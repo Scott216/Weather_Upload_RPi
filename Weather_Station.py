@@ -1,31 +1,30 @@
 # Uses Moteino to get wireless weather data from Davis ISS weather station
 # and sends it to weather underground
+# Git Repo: https://github.com/Scott216/Weather_Upload_RPi
 
-# To Do:
-#  Consider smaller array for average wind direction
-#  Save raw, instant and avg wind direction and verify that it's getting calculated correctly
-#  Consider averaging wind speed a little
-
+# To Do
+# Sometimes on startup, program is sending dewpoint of 0 to WU
 
 # Change Log
 # 11/28/18 v1.00 - Initial RPi version
 # 12/27/18 v1.01 - changed I/O pins
 # 12/31/18 v1.02 - Added packet printout in hex to data table
 # 01/01/19 v1.03 - removed Cap voltage from printout.  Fixed wind gust error in URL
-# 01/02/18 v1.04 - changed WU upload timing. Added wind direction logging.  Added I2C error counter
-# 01/03/18 v1.05 - Fixed bug in avgWindDir()
+# 01/02/19 v1.04 - changed WU upload timing. Added wind direction logging.  Added I2C error counter
+# 01/03/19 v1.05 - Fixed bug in avgWindDir(), didn't have "self" infront of the arrays
+# 01/03/19 v1.06 - Removed wind direction logging.  Added comments
+# 01/04/19 v1.07 - Added timeout and error handling in WU_upload.py and WU_download.py
 
-version = "v1.05" 
+version = "v1.08" 
 
 import time
 import smbus  # Used by I2C
-import math # used by humidity calculation
+import math # Used by humidity calculation
 import RPi.GPIO as GPIO # reads/writes GPIO pins
-import WU_credentials
-import WU_download
-import WU_upload
-import WU_decodeWirelessData
-import WU_logWindDir
+import WU_credentials # Weather underground password, API key and station IDs
+import WU_download  # downloads daily rain on startup, and pressure from other weather staitons
+import WU_upload  # uploads data to Weather Underground
+import WU_decodeWirelessData # Decodes wireless data coming from Davis ISS weather station
 import weatherData_cls # class to hold weather data for the Davis ISS station
 from subprocess import check_output # used to print RPi IP address
 
@@ -142,7 +141,6 @@ def decodeRawData(packet):
     if newWindDir >= 0:
         suntec.windDir = newWindDir
         suntec.avgWindDir(newWindDir)
-        WU_logWindDir.windDataLogging(packet[2], newWindDir, suntec.windDir) # srg debug - use to verify average calc
     else:
         print('Error exrtacting wind direction from packet. Got {} from {}'.format(newWindDir, packet))
         return(False) # Error extracing wind direction, stop processing packet

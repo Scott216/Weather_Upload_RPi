@@ -36,13 +36,35 @@ def upload2WU(weatherData, stationID):
         full_URL = full_URL + '&humidity={:.1f}'.format(weatherData.humidity)
     
     full_URL = full_URL + WU_software + WU_action
-    
-    r = requests.get(full_URL) # send data to WU
 
-    # If uploaded successfully, website will reply with 200
-    if r.status_code == 200:
-        return(True)
-    else:
-        print('Upload Error: {}  {}'.format(r.status_code, r.text))
+    try:
+        r = requests.get(full_URL, timeout=5) # send data to WU
+
+        # If uploaded successfully, website will reply with 200
+        if r.status_code == 200:
+            return(True)
+        else:
+            print('Upload Error: {}  {}'.format(r.status_code, r.text))
+            return(False)
+
+    except requests.exceptions.ConnectionError:
+        print("Upload Error in upload2WU() - ConnectionError")
         return(False)
 
+    except requests.exceptions.NewConnectionError:
+        print("Upload Error in upload2WU() - NewConnectionError")
+        return(False)
+
+    except requests.exceptions.MaxRetryError:
+        print("Upload Error in upload2WU() - MaxRetryError")
+        return(False)
+
+    except socket.gaierror:
+        print("Upload Error in upload2WU() - socket.gaierror")
+        return(False)
+
+    except:
+        print("Upload Error in upload2WU() - other")
+        return(False)
+       
+        
