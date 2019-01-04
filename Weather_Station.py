@@ -1,0 +1,379 @@
+# Uses Moteino to get wireless weather data from Davis ISS weather station
+# and sends it to weather underground
+
+# To Do:
+#  Consider smaller array for average wind direction
+#  Save raw, instant and avg wind direction and verify that it's getting calculated correctly
+#  Consider averaging wind speed a little
+
+
+# Change Log
+# 11/28/18 v1.00 - Initial RPi version
+# 12/27/18 v1.01 - changed I/O pins
+# 12/31/18 v1.02 - Added packet printout in hex to data table
+# 01/01/19 v1.03 - removed Cap voltage from printout.  Fixed wind gust error in URL
+# 01/02/18 v1.04 - changed WU upload timing. Added wind direction logging.  Added I2C error counter
+# 01/03/18 v1.05 - Fixed bug in avgWindDir()
+
+version = "v1.05" 
+
+import time
+import smbus  # Used by I2C
+import math # used by humidity calculation
+import RPi.GPIO as GPIO # reads/writes GPIO pins
+import WU_credentials
+import WU_download
+import WU_upload
+import WU_decodeWirelessData
+import WU_logWindDir
+import weatherData_cls # class to hold weather data for the Davis ISS station
+from subprocess import check_output # used to print RPi IP address
+
+I2C_ADDRESS = 0x04 # I2C address of Moteino
+ISS_STATION_ID = 1
+#WU_STATION = WU_credentials.WU_STATION_ID_SUNTEC # Main weather station
+WU_STATION = WU_credentials.WU_STATION_ID_TEST # Test weather station
+
+# Instantiate suntec object from weatherStation class
+suntec = weatherData_cls.weatherStation(ISS_STATION_ID)
+
+# Header byte 0, 4 MSB describe data in bytes 3-4
+ISS_CAP_VOLTS    = 0x2
+ISS_UV_INDEX     = 0x4
+ISS_RAIN_SECONDS = 0x5
+ISS_SOLAR_RAD    = 0x6
+ISS_OUT_TEMP     = 0x8
+ISS_WIND_GUST    = 0x9
+ISS_HUMIDITY     = 0xA
+ISS_RAIN_COUNT   = 0xE
+
+# GPIO pins, these are board # pins, not BCM pin
+MOTEINO_HEARTBEAT_PIN     = 18  # Input pin connected to Moteino heartbeat output. (BCM 24)
+MOTEINO_READY_PIN         = 33  # Input pin connected to Moteino output pin that signals Moteino is ready to send data to RPi.  (BDM 13)
+MOTEINO_RESET_PIN         = 36  # Output pin connected to Moteino Reset pin (BCM 16)
+
+
+g_rainCounterOld = 0   # Previous value of rain counter, used in def decodeRawData()
+g_rainCntDataPts = 0   # Counts the times RPi has received rain counter data, this is not the actual rain counter, thats g_rainCounterOld and rainCounterNew
+
+g_rawDataNew = [0.0] * 8 # initialize rawData list. This is weather data that's sent from Moteino
+
+g_TableHeaderCntr1 = 0 # used to print header for weather data summary every so often
+
+g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send data to RPi
+g_i2cErrorCnt = 0 # Daily counter for I2C errors
+
+g_uploadFreq = 10 # seconds between uploads to Weather Underground
+tmr_upload = time.time()  # Initialize timer to trigger when to upload to Weather Underground
+
+
+#---------------------------------------------------------------------
+# Start up 
+#---------------------------------------------------------------------
+
+print(check_output(['hostname', '-I'])) # print IP address
+print(version)
+
+# get daily rain data from weather station
+newRainToday = WU_download.getDailyRain()
+if newRainToday >= 0:
+    suntec.rainToday = newRainToday
+else:
+    print("Error getting rain data on startup")
+
+newPressure = WU_download.getPressure()
+if newPressure > 25:
+    suntec.pressure = newPressure
+else:
+    print("Error getting pressure data on startup")
+
+i2c_bus = smbus.SMBus(1)  # for I2C
+
+# Setup GPIO using Board numbering (vs BCM numbering)
+GPIO.setmode(GPIO.BOARD)
+# setup pin as input with pull down resistor
+GPIO.setwarnings(False) 
+GPIO.setup(MOTEINO_HEARTBEAT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(MOTEINO_READY_PIN,     GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(MOTEINO_RESET_PIN,     GPIO.OUT)
+GPIO.output(MOTEINO_RESET_PIN, 1) # set pin high. Moteino resets when it's pin is grounded
+
+
+g_heartbeatNew = GPIO.input(MOTEINO_HEARTBEAT_PIN)
+g_heartbeatOld = g_heartbeatNew
+g_lastHeartbeatTime = time.time() 
+
+
+# Initialize day of month variable, used to detect when new day starts
+g_oldDayOfMonth = int(time.strftime("%d"))   
+
+g_tmr_Moteino = time.time()  # Used to request data from moteino every second
+
+
+
+#---------------------------------------------------------------------
+# Decode weather data from wireless packet
+#---------------------------------------------------------------------
+def decodeRawData(packet):
+    # check CRC
+    if WU_decodeWirelessData.crc16_ccitt(packet) == False:
+        print('Invalid CRC {0[6]}, {0[7]}'.format(packet))
+        return(False) # CRC Failed, stop processing packet
+
+    # Check station ID, don't want to get data from another nearby station
+    packetStationID = WU_decodeWirelessData.stationID(packet)
+    if packetStationID != suntec.stationID:
+        print('Wrong station ID.  Expected {} but got{}'.format(suntec.stationID), packetStationID)
+        return(False) # wrong station ID, stop processing packet
+    
+    # CRC passed and staion ID okay, extract weather data from packet
+
+    # Wind speed is in every packet
+    newWindSpeed = WU_decodeWirelessData.windSpeed(packet)
+    if newWindSpeed >= 0:
+        suntec.windSpeed = newWindSpeed
+    else:
+        print('Error exrtacting wind speed from packet. Got {} from {}'.format(newWindSpeed, packet))
+        suntec.windSpeed  = 0
+        return(False) # error extracing wind speed, stop processing packet
+    
+    # Wind direction is in every packet
+    newWindDir = WU_decodeWirelessData.windDirection(packet)
+    if newWindDir >= 0:
+        suntec.windDir = newWindDir
+        suntec.avgWindDir(newWindDir)
+        WU_logWindDir.windDataLogging(packet[2], newWindDir, suntec.windDir) # srg debug - use to verify average calc
+    else:
+        print('Error exrtacting wind direction from packet. Got {} from {}'.format(newWindDir, packet))
+        return(False) # Error extracing wind direction, stop processing packet
+     
+    dataSent = packet[0] >> 4 # From header byte 0, determine what data has been sent, then decode appropriate data below
+
+    # Returns rain bucket tip counter.  1 count = 0.01".  Counter rolls over at 127
+    if dataSent == ISS_RAIN_COUNT:
+        global g_rainCounterOld
+        global g_rainCntDataPts
+        global g_oldDayOfMonth
+        
+        rainCounterNew = WU_decodeWirelessData.rainCounter(packet)
+        if rainCounterNew < 0 or rainCounterNew > 127:
+            print('Invalid rain counter value:{} from {}'.format(rainCounterNew, packet))
+            return(False) # Invalid rain counter value
+        
+        # Don't calculate rain counts until RPi has received 2nd data point.  First data point will be the
+        # starting value, then 2nd data point will be the accumulation, if any.  For example, if first time
+        # data arrives its 50, we don't want to take 50-0 = 50 (ie 0.5") and add that to the daily rain accumulation.
+        # Wait until the next data point comes in, which will probably be 50 (in this example), so 50-50 = 0.  No rain accumulated.
+        # If it's raining at the time of reboot, you might get 51, so 51 - 50 = 1 or 0.01" added.
+        if (g_rainCntDataPts == 1):
+            g_rainCounterOld = rainCounterNew
+            
+        if (g_rainCntDataPts >= 2) and (g_rainCounterOld != rainCounterNew):
+
+            # See how many bucket tips counter went up.  Should be only one unless it's 
+            # raining really hard or there is a long transmission delay from ISS
+            if (rainCounterNew < g_rainCounterOld):
+                newRain = (128 - g_rainCounterOld) + rainCounterNew # Rain counter has rolled over (counts from 0 - 127)
+            else:
+                newRain = rainCounterNew - g_rainCounterOld
+            
+            suntec.rainToday += newRain/100.0;  # Increment daily rain counter
+            g_rainCounterOld = rainCounterNew
+                
+        g_rainCntDataPts += 1 # Increment number times RPi received rain count data
+
+        #if it's a new day, reset daily rain accumulation and I2C Error counter
+        newDayOfMonth = int(time.strftime("%d"))
+        if newDayOfMonth != g_oldDayOfMonth:
+            suntec.rainToday = 0.0
+            g_oldDayOfMonth = newDayOfMonth
+            g_i2cErrorCnt = 0
+
+        return(True)
+        
+    # Returns rain rate in inches per hour
+    if dataSent == ISS_RAIN_SECONDS:
+        rainSeconds = WU_decodeWirelessData.rainRate(packet) # seconds between bucket tips, 0.01" per tip
+        fifteenMin = 60 * 15 # seconds in 15 minutes
+        if rainSeconds > 0: #If no error
+            if (rainSeconds < fifteenMin):
+                suntec.rainRate = (0.01 * 3600.0) / rainSeconds
+            else:
+                suntec.rainRate = 0.0 # More then 15 minutes since last bucket tip, can't calculate rain rate until next bucket tip
+            return(True)
+        print('Invalid rain seconds. Got {} from {}'.format(rainSeconds, packet))
+        return(False)
+    
+    # Returns temperature F
+    if dataSent == ISS_OUT_TEMP:
+        newTemp = WU_decodeWirelessData.temperature(packet)
+        if newTemp > -100: #If no error
+            suntec.outsideTemp = newTemp
+            if suntec.gotHumidityData():
+                newDewPoint = suntec.calcDewPoint() # Calculate dew point
+                if (newDewPoint <= -100): 
+                    print('Invalid dewpoint: {} from temp={} and humidity={}'.format(newDewPoint, suntec.outsideTemp, suntec.humidity))
+            return(True)
+        else: 
+            print('Invalid temperature. Got {} from {}'.format(newTemp, packet))
+            return(False)
+    
+    # Returns wind gusts in MPH
+    if dataSent == ISS_WIND_GUST:
+        newWindGust = WU_decodeWirelessData.windGusts(packet)
+        if newWindGust >= 0:
+            suntec.windGust = newWindGust
+            return(True)
+        print('Invalid wind gust. Got {} from {}'.format(newWindGuest, packet))
+        return(False)
+    
+    # Returns relative humidity
+    if dataSent == ISS_HUMIDITY:
+        newHumidity = WU_decodeWirelessData.humidity(packet)
+        if newHumidity > 0:
+            suntec.humidity = newHumidity
+            return(True)
+        print('Invalid RG. Got {} from {}'.format(newHumidity, packet))
+        return(False)
+
+    # Returns capicator voltage
+    if dataSent == ISS_CAP_VOLTS:
+        newCapVolts = WU_decodeWirelessData.capVoltage(packet)
+        if newCapVolts >= 0:
+            suntec.capacitorVolts = newCapVolts
+            return(True)
+        else:
+            print('Invalid cap volts.  Got {} from {}'.format(newCapVolts, packet))
+            suntec.capacitorVolts = -1
+            return(False)
+
+#---------------------------------------------------------------------
+# With temperature and humidity, calculat the dew point
+# Ref: http://playground.arduino.cc/Main/DHT11Lib
+#---------------------------------------------------------------------
+def calcDewPointLocal():
+
+    celsius = (suntec.outsideTemp - 32.0 ) / 1.8 # convert to celcius
+    a = 17.271
+    b = 237.7
+    alpha = ((a * celsius) / (b + celsius)) + math.log(suntec.humidity / 100)
+    Td = (b * alpha) / (a - alpha)
+    Td = Td * 1.8 + 32.0  # convert back to Fahrenheit
+    suntec.dewPoint = Td
+    return ()
+
+
+#---------------------------------------------------------------------
+# Prints uploaded weather data
+#---------------------------------------------------------------------
+def printWeatherDataTable():
+
+    global g_TableHeaderCntr1
+    strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\trrate\ttoday\t dew\t\ttime'
+    strSummary = '{0.outsideTemp}\t{0.humidity}\t{0.pressure}\t {0.windSpeed}\t {0.windGust}\t {0.windDir:03.0f}\t{0.rainRate:.2f}\t{0.rainToday:.2f}\t {0.dewPoint:.2f}\t' \
+                 .format(suntec) + time.strftime("%m/%d/%Y %H:%M:%S")
+    strSummary = strSummary + "   " + ''.join(['%02x ' %b for b in g_rawDataNew])
+    
+    if (g_TableHeaderCntr1 == 0):
+        print(strHeader)
+        g_TableHeaderCntr1 = 20 # reset header counter
+    print(strSummary)
+    
+    g_TableHeaderCntr1 -= 1
+    
+#---------------------------------------------------------------------
+# Prints wireless packet data
+#---------------------------------------------------------------------
+def printWirelessData():
+
+    wirelessData =  ''.join(['%02x ' %b for b in g_rawDataNew])
+    print(wirelessData)
+    
+
+#---------------------------------------------------------------------
+# Checks Moteino heartbeat
+#---------------------------------------------------------------------
+def isHeartbeatOK():
+
+    global g_heartbeatNew
+    global g_heartbeatOld
+    global g_lastHeartbeatTime
+    global MOTEINO_HEARTBEAT_PIN
+    heartbeat_timeout = 5 * 60 # set timeout to 5 minutes
+    
+    
+    #check Moteino heartbeat ouput to see if Moteino is still running
+    g_heartbeatNew = GPIO.input(MOTEINO_HEARTBEAT_PIN)
+    if (g_heartbeatNew != g_heartbeatOld):
+        # Heartbeat has changed state
+        g_heartbeatOld = g_heartbeatNew
+        g_lastHeartbeatTime = time.time()
+        return(True)
+    else:
+        # See how long it's been since the last heartbeat
+        heartbeatAge = time.time() - g_lastHeartbeatTime
+        if heartbeatAge > heartbeat_timeout:
+            print("No Moteino heartbeat, will reset Moteino")
+            resetMoteino() # Moteino has locked up, need to reset it
+            return(False)
+        else:
+            # Heartbeat hasn't timed out yet
+            return(True)
+
+#---------------------------------------------------------------------
+# Reset Moteino, used when no heartbeat is detected or hasn't received any new data
+#---------------------------------------------------------------------
+def resetMoteino():
+
+    global MOTEINO_RESET_PIN
+
+    # Reset Moteino by by grounding it's reset pin momentarily
+    GPIO.output(MOTEINO_RESET_PIN, 0) # Ground the pin to reset Moteino
+    time.sleep(2)
+    GPIO.output(MOTEINO_RESET_PIN, 1) # Return pin to high state
+    time.sleep(10) # give moteino time to reboot
+    return(True)
+
+
+#---------------------------------------------------------------------
+# Main loop
+#---------------------------------------------------------------------
+while True:
+
+    g_moteinoReady = GPIO.input(MOTEINO_READY_PIN) # Moteino will set output pin high when it wants to send data to RPi
+    decodeStatus = False # Reset status
+    
+    if (g_moteinoReady and (time.time() > g_tmr_Moteino) and isHeartbeatOK()): 
+        g_tmr_Moteino = time.time() + 1 # add 1 second to Moteino timer, this is used so Moteino is only queried once a second
+        
+        # Copy previously recieved raw data into separate list so it can be compared to new data coming in to see if it changed
+        rawDataOld = list(g_rawDataNew)
+
+        # Get new data from Moteino
+        # Exception handler for: OSError: [Errno 5] Input/output error. This occures when Moteino is rebooted
+        try:
+            g_rawDataNew = i2c_bus.read_i2c_block_data(I2C_ADDRESS, 0, 8)  # Get data from Moteino, 0 byte offset, get 8 bytes
+            if (g_rawDataNew != rawDataOld): # see if new data has changed
+                decodeStatus = decodeRawData(g_rawDataNew) # send packet to decodeRawData() for decoding
+                if decodeStatus == False:
+                    print("Error decoding data")
+                 
+        except OSError:
+            print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
+            g_i2cErrorCnt += 1
+            time.sleep(10)
+            
+                  
+    # If RPi has reecived new valid data from Moteino, and upload timer has passed, then upload new data to Weather Underground
+    if ((decodeStatus == True) & (time.time() > tmr_upload)):
+        suntec.pressure = WU_download.getPressure() # get latest pressure from local weather station
+        printWeatherDataTable()
+        uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
+        if uploadStatus == True:
+            tmr_upload = time.time() + g_uploadFreq # set next upload time
+        else:
+            Print("Upload to WU failed") 
+
+
+GPIO.cleanup() # used when exiting a program to reset the pins
+
