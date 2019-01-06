@@ -2,8 +2,12 @@
 # and sends it to weather underground
 # Git Repo: https://github.com/Scott216/Weather_Upload_RPi
 
+
+
 # To Do
-# Sometimes on startup, program is sending dewpoint of 0 to WU
+# Get Pressure sensor and connect to RPi instead of getting pressure from another staiton
+# Average out the wind speed a bit - maybe
+
 
 # Change Log
 # 11/28/18 v1.00 - Initial RPi version
@@ -13,7 +17,10 @@
 # 01/02/19 v1.04 - changed WU upload timing. Added wind direction logging.  Added I2C error counter
 # 01/03/19 v1.05 - Fixed bug in avgWindDir(), didn't have "self" infront of the arrays
 # 01/03/19 v1.06 - Removed wind direction logging.  Added comments
-# 01/04/19 v1.07 - Added timeout and error handling in WU_upload.py and WU_download.py
+# 01/04/19 v1.07 - Added timeout and error handling in WU_upload.py and WU_download.py.  Couple other small bug fixes
+# 01/05/19 v1.08 - Added current wind dir and data type (from packet header) to printout.
+#                  In weatherData.cls.py added gotHumidityData() and gotTemperatureData() to gotDewPointData() 
+#                  Doesn't upload any data until RPi has temperature and R/H and can calculate dewpoint
 
 version = "v1.08" 
 
@@ -63,14 +70,15 @@ g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send 
 g_i2cErrorCnt = 0 # Daily counter for I2C errors
 
 g_uploadFreq = 10 # seconds between uploads to Weather Underground
+
 tmr_upload = time.time()  # Initialize timer to trigger when to upload to Weather Underground
 
 
 #---------------------------------------------------------------------
 # Start up 
 #---------------------------------------------------------------------
-
-print(check_output(['hostname', '-I'])) # print IP address
+IP = check_output(['hostname', '-I'])
+print("RPi IP Address: {}".format(IP))
 print(version)
 
 # get daily rain data from weather station
@@ -122,7 +130,7 @@ def decodeRawData(packet):
     # Check station ID, don't want to get data from another nearby station
     packetStationID = WU_decodeWirelessData.stationID(packet)
     if packetStationID != suntec.stationID:
-        print('Wrong station ID.  Expected {} but got{}'.format(suntec.stationID), packetStationID)
+        print('Wrong station ID.  Expected {} but got{}'.format(suntec.stationID, packetStationID))
         return(False) # wrong station ID, stop processing packet
     
     # CRC passed and staion ID okay, extract weather data from packet
@@ -267,10 +275,15 @@ def calcDewPointLocal():
 def printWeatherDataTable():
 
     global g_TableHeaderCntr1
-    strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\trrate\ttoday\t dew\t\ttime'
-    strSummary = '{0.outsideTemp}\t{0.humidity}\t{0.pressure}\t {0.windSpeed}\t {0.windGust}\t {0.windDir:03.0f}\t{0.rainRate:.2f}\t{0.rainToday:.2f}\t {0.dewPoint:.2f}\t' \
-                 .format(suntec) + time.strftime("%m/%d/%Y %H:%M:%S")
-    strSummary = strSummary + "   " + ''.join(['%02x ' %b for b in g_rawDataNew])
+    dataType = ["0x0", "0x1", "Super Cap", "0x3", "UV Index", "Rain Seconds", "Solar Radiation", "Solar Cell Volts", \
+                "Temperature", "Gusts", "Humidity", "0xB", "0xC", "0xD", "Rain Counter", "0xF"]
+    
+    windDirNow = (g_rawDataNew[2] * 1.40625) + 0.3
+    
+    strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\t\ttime'
+    strSummary = '{0.outsideTemp}\t{0.humidity}\t{0.pressure}\t {0.windSpeed}\t {0.windGust}\t {1:03.0f}\t{0.windDir:03.0f}\t{0.rainRate:.2f}\t{0.rainToday:.2f}\t {0.dewPoint:.2f}\t' \
+                 .format(suntec, windDirNow) + time.strftime("%m/%d/%Y %H:%M:%S")
+    strSummary = strSummary + "   " + ''.join(['%02x ' %b for b in g_rawDataNew]) + "("  + dataType[g_rawDataNew[0] >> 4] + ")"
     
     if (g_TableHeaderCntr1 == 0):
         print(strHeader)
@@ -357,20 +370,21 @@ while True:
                     print("Error decoding data")
                  
         except OSError:
-            print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
             g_i2cErrorCnt += 1
+            print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
             time.sleep(10)
             
                   
-    # If RPi has reecived new valid data from Moteino, and upload timer has passed, then upload new data to Weather Underground
-    if ((decodeStatus == True) & (time.time() > tmr_upload)):
+    # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp and R/H)
+    # then upload new data to Weather Underground
+    if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
         suntec.pressure = WU_download.getPressure() # get latest pressure from local weather station
         printWeatherDataTable()
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
         if uploadStatus == True:
             tmr_upload = time.time() + g_uploadFreq # set next upload time
         else:
-            Print("Upload to WU failed") 
+            print("Upload to WU failed") 
 
 
 GPIO.cleanup() # used when exiting a program to reset the pins

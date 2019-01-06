@@ -64,7 +64,7 @@ class weatherStation:
         return (self.rainToday > weatherStation.NO_DATA_YET)
 
     def gotDewPointData(self):
-        return (self.dewPoint > weatherStation.NO_DATA_YET)
+        return ( (self.dewPoint > weatherStation.NO_DATA_YET) and self.gotHumidityData() and self.gotTemperatureData())
 
     def gotUvIndexData(self):
         return (self.uvIndex > weatherStation.NO_DATA_YET)

@@ -6,6 +6,7 @@ import weatherData_cls # class to hold weather data for the Davis ISS station
 # This function uploads the weather data to Weather Underground
 # weatherData parameter is an instance of the weatherStation class in weather_Data_cls.py
 # stationID is the Weather Underground station ID
+# Note, if you don't send WU temperature and dewpoint, it will assume zero
 def upload2WU(weatherData, stationID):
         
     # create strings to hold various parts of upload URL
@@ -35,6 +36,7 @@ def upload2WU(weatherData, stationID):
     if weatherData.gotHumidityData():
         full_URL = full_URL + '&humidity={:.1f}'.format(weatherData.humidity)
     
+
     full_URL = full_URL + WU_software + WU_action
 
     try:
