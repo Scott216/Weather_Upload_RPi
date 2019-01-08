@@ -6,7 +6,10 @@
 
 # To Do
 # Get Pressure sensor and connect to RPi instead of getting pressure from another staiton
+#   https://tutorials-raspberrypi.com/raspberry-pi-and-i2c-air-pressure-sensor-bmp180
+#   Better sonsor is BMP280
 # Average out the wind speed a bit - maybe
+# Verify if WU_download getPressure() is really chekcing secondary station if first one fails
 
 
 # Change Log
@@ -21,8 +24,11 @@
 # 01/05/19 v1.08 - Added current wind dir and data type (from packet header) to printout.
 #                  In weatherData.cls.py added gotHumidityData() and gotTemperatureData() to gotDewPointData() 
 #                  Doesn't upload any data until RPi has temperature and R/H and can calculate dewpoint
+# 01/06/19 v1.09 - Moved new day reset to main loop
+# 01/06/19 v1.10 - Used .format() with getUrl string in WU_download.py. Changed primary station for getting pressure data
+# 01/07/19 v1.11 - Changed pressure upload so it would return last valid pressure instead of nothing. WU treats no data as zero
 
-version = "v1.08" 
+version = "v1.11" 
 
 import time
 import smbus  # Used by I2C
@@ -159,7 +165,6 @@ def decodeRawData(packet):
     if dataSent == ISS_RAIN_COUNT:
         global g_rainCounterOld
         global g_rainCntDataPts
-        global g_oldDayOfMonth
         
         rainCounterNew = WU_decodeWirelessData.rainCounter(packet)
         if rainCounterNew < 0 or rainCounterNew > 127:
@@ -187,13 +192,6 @@ def decodeRawData(packet):
             g_rainCounterOld = rainCounterNew
                 
         g_rainCntDataPts += 1 # Increment number times RPi received rain count data
-
-        #if it's a new day, reset daily rain accumulation and I2C Error counter
-        newDayOfMonth = int(time.strftime("%d"))
-        if newDayOfMonth != g_oldDayOfMonth:
-            suntec.rainToday = 0.0
-            g_oldDayOfMonth = newDayOfMonth
-            g_i2cErrorCnt = 0
 
         return(True)
         
@@ -373,12 +371,21 @@ while True:
             g_i2cErrorCnt += 1
             print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
             time.sleep(10)
+
+    #if it's a new day, reset daily rain accumulation and I2C Error counter
+    newDayOfMonth = int(time.strftime("%d"))
+    if newDayOfMonth != g_oldDayOfMonth:
+        suntec.rainToday = 0.0
+        g_oldDayOfMonth = newDayOfMonth
+        g_i2cErrorCnt = 0
             
                   
     # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp and R/H)
     # then upload new data to Weather Underground
     if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
-        suntec.pressure = WU_download.getPressure() # get latest pressure from local weather station
+        newPressure =  WU_download.getPressure() # get latest pressure from local weather station
+        if (newPressure > 25):
+            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update date, if not, no nothing and last valid reading will be used
         printWeatherDataTable()
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
         if uploadStatus == True:

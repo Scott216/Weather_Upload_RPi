@@ -31,12 +31,14 @@ def upload2WU(weatherData, stationID):
         full_URL = full_URL + '&dailyrainin={:.2f}'.format(weatherData.rainToday)
     if weatherData.gotPressureData():
         full_URL = full_URL + '&baromin={:.2f}'.format(weatherData.pressure)
+    else:
+        full_URL = full_URL + '&baromin=25.00'  # if pressure is ommitted, WU assumes zero, so just enter 25 as a default
     if weatherData.gotDewPointData():
         full_URL = full_URL + '&dewptf={:.1f}'.format(weatherData.dewPoint)
     if weatherData.gotHumidityData():
         full_URL = full_URL + '&humidity={:.1f}'.format(weatherData.humidity)
     
-
+        
     full_URL = full_URL + WU_software + WU_action
 
     try:
