@@ -16,6 +16,7 @@ class weatherStation:
 
         # initialize weather data variables
         self.outsideTemp    = weatherStation.NO_DATA_YET
+        self.windChill      = weatherStation.NO_DATA_YET
         self.humidity       = weatherStation.NO_DATA_YET
         self.pressure       = weatherStation.NO_DATA_YET
         self.windSpeed      = weatherStation.NO_DATA_YET
@@ -41,6 +42,9 @@ class weatherStation:
     # got...Data() functions return True once good weather data for that variable has been set
     def gotTemperatureData(self):
         return (self.outsideTemp > weatherStation.NO_DATA_YET)
+
+    def gotWindChillData(self):
+        return (self.windChill > weatherStation.NO_DATA_YET)
         
     def gotHumidityData(self):
         return (self.humidity > weatherStation.NO_DATA_YET)
@@ -153,20 +157,15 @@ class weatherStation:
             return (Td)
         return(weatherStation.NO_DATA_YET)
 
+    #---------------------------------------------------------------------
+    # Calculate Wind Chill
+    #---------------------------------------------------------------------
+    def calcWindChill(self):
 
+        if self.gotTemperatureData() and self.gotWindSpeedData():
+            self.windChill = (self.outsideTemp * 0.6215) - (35.75 * self.windSpeed**0.16) + (0.4275 * self.outsideTemp * self.windSpeed**0.16) + 35.74
+            return(self.windChill)
+        else:
+            suntec.windChill = weatherStation.NO_DATA_YET
+            return (weatherStation.NO_DATA_YET)
 
-        # =============================================================================
-        # Wind Chill = 35.74 + 0.6215T - 35.75(V^0.16)+0.4275T(V^0.16)
-        #   V is wind speed (MPH)
-        #   T is temperature (F)
-        # Source: http://www.crh.noaa.gov/ddc/?n=windchill
-        #=============================================================================
-        def calcWindChill(self):
-            if self.gotTemperatureData() and self.gotWindSpeedData():
-                v2 = self.windSpeed ** 0.16
-                windChillTempF = 35.74 + 0.6215 * self.outsideTemp - 35.75 * v2 + (0.4275 * self.outsideTemp) * v2
-                return windChillTempF
-            else:
-                return weatherStation.NO_DATA_YET            
-  
- 

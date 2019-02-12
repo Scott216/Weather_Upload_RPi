@@ -8,8 +8,9 @@
 # Get Pressure sensor and connect to RPi instead of getting pressure from another staiton
 #   https://tutorials-raspberrypi.com/raspberry-pi-and-i2c-air-pressure-sensor-bmp180
 #   Better sonsor is BMP280
-# Average out the wind speed a bit - maybe
-# Verify if WU_download getPressure() is really chekcing secondary station if first one fails
+# Calculate and upload wind chill
+#   Wind Chill = (Temp * 0.6215) - (35.75 * windspeed**0.16) + (0.4275 * Temp * windspeed**0.16) + 35.74
+
 
 
 # Change Log
@@ -27,8 +28,11 @@
 # 01/06/19 v1.09 - Moved new day reset to main loop
 # 01/06/19 v1.10 - Used .format() with getUrl string in WU_download.py. Changed primary station for getting pressure data
 # 01/07/19 v1.11 - Changed pressure upload so it would return last valid pressure instead of nothing. WU treats no data as zero
+# 01/21/19 v1.12 - in WU_decodeWirelessData.py, fixed temperature() to return negative numbers properly
+# 02/02/19 v1.13 - Added wind chill, removed dewPointLocal()
+# 02/11/19 v1.14 - Switched from test station to Suntec station
 
-version = "v1.11" 
+version = "v1.14" 
 
 import time
 import smbus  # Used by I2C
@@ -43,8 +47,8 @@ from subprocess import check_output # used to print RPi IP address
 
 I2C_ADDRESS = 0x04 # I2C address of Moteino
 ISS_STATION_ID = 1
-#WU_STATION = WU_credentials.WU_STATION_ID_SUNTEC # Main weather station
-WU_STATION = WU_credentials.WU_STATION_ID_TEST # Test weather station
+WU_STATION = WU_credentials.WU_STATION_ID_SUNTEC # Main weather station
+# WU_STATION = WU_credentials.WU_STATION_ID_TEST # Test weather station
 
 # Instantiate suntec object from weatherStation class
 suntec = weatherData_cls.weatherStation(ISS_STATION_ID)
@@ -213,6 +217,7 @@ def decodeRawData(packet):
         newTemp = WU_decodeWirelessData.temperature(packet)
         if newTemp > -100: #If no error
             suntec.outsideTemp = newTemp
+            suntec.calcWindChill() # calculate windchill
             if suntec.gotHumidityData():
                 newDewPoint = suntec.calcDewPoint() # Calculate dew point
                 if (newDewPoint <= -100): 
@@ -250,21 +255,6 @@ def decodeRawData(packet):
             print('Invalid cap volts.  Got {} from {}'.format(newCapVolts, packet))
             suntec.capacitorVolts = -1
             return(False)
-
-#---------------------------------------------------------------------
-# With temperature and humidity, calculat the dew point
-# Ref: http://playground.arduino.cc/Main/DHT11Lib
-#---------------------------------------------------------------------
-def calcDewPointLocal():
-
-    celsius = (suntec.outsideTemp - 32.0 ) / 1.8 # convert to celcius
-    a = 17.271
-    b = 237.7
-    alpha = ((a * celsius) / (b + celsius)) + math.log(suntec.humidity / 100)
-    Td = (b * alpha) / (a - alpha)
-    Td = Td * 1.8 + 32.0  # convert back to Fahrenheit
-    suntec.dewPoint = Td
-    return ()
 
 
 #---------------------------------------------------------------------

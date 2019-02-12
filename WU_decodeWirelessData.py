@@ -149,12 +149,25 @@ def windGusts(rawData):
 
 
 # ---------------------------------------------------------------------------------------------
+# Help wtih 2's complement:
+#   https://stackoverflow.com/questions/54297651/python-2s-complement-conversion
 def temperature(rawData):
+    
+    
     # Verify packet contains temperature data
     if (rawData[0] >> 4) != ISS_OUT_TEMP:
         return (ERR_WRONG_PACKET)  # Wrong packet type - doesn't contain temperature data
 
-    outsideTemperature = (rawData[3] * 256 + rawData[4]) >> 4  # Temp F in 1/10 degrees, ie 320 = 32.0F
+    # Temp F in 1/10 degrees, ie 320 = 32.0F
+    # check for negative temperature 
+    if (rawData[3] >= 128):
+        # Temp is negative, binary number is 2's complements
+        byte_mask = ~0xFFFF
+        outsideTemperature = ( ((rawData[3] << 8) + rawData[4]) | byte_mask) >> 4
+    else: # temp is positive
+    #    outsideTemperature = (rawData[3] * 256 + rawData[4]) >> 4  
+        outsideTemperature = ((rawData[3] << 8) + rawData[4]) >> 4
+                               
     outsideTemperature = outsideTemperature / 10.0 # convert from tenths to degrees
 
     if (outsideTemperature < -100 or outsideTemperature > 130): # check for valid range

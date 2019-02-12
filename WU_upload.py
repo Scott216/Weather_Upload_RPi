@@ -1,3 +1,7 @@
+# Weather Underground API - Response fileds
+# https://www.wunderground.com/weather/api/d/docs?d=data/conditions
+
+
 import requests        # Allows you to send HTTP/1.1 requests
 import WU_credentials  # Weather underground password, station IDs and API key
 import weatherData_cls # class to hold weather data for the Davis ISS station
@@ -37,8 +41,11 @@ def upload2WU(weatherData, stationID):
         full_URL = full_URL + '&dewptf={:.1f}'.format(weatherData.dewPoint)
     if weatherData.gotHumidityData():
         full_URL = full_URL + '&humidity={:.1f}'.format(weatherData.humidity)
+    if weatherData.gotWindChillData():
+        full_URL = full_URL + '&windchill_f={:.1f}'.format(weatherData.windChill)
+
+    # print(full_URL)  # srg debug
     
-        
     full_URL = full_URL + WU_software + WU_action
 
     try:
@@ -57,6 +64,10 @@ def upload2WU(weatherData, stationID):
 
     except requests.exceptions.NewConnectionError:
         print("Upload Error in upload2WU() - NewConnectionError")
+        return(False)
+
+    except requests.exceptions.ReadTimeout:
+        print("Upload Error in upload2WU() - ReadTimeout")
         return(False)
 
     except requests.exceptions.MaxRetryError:
