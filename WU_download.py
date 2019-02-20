@@ -25,7 +25,7 @@ def getDailyRain():
     getUrl = "http://api.wunderground.com/api/{}/geolookup/conditions/q/pws:{}.json".format(WU_credentials.WU_API_KEY, WU_credentials.WU_STATION_ID_SUNTEC)
 
     try:
-        response = requests.get(getUrl, timeout=5).json()
+        response = requests.get(getUrl, timeout=10).json()
         if len(response) > 1:
             if isNumber(response['current_observation']['precip_today_in']):
                 daily_rain = float(response['current_observation']['precip_today_in'])
@@ -34,20 +34,21 @@ def getDailyRain():
 
         return(ERR_INVALID_DATA)
 
-    except:
-        print("Error in WU_download.py getDailyRain() - failed get() request")
+    except Exception:
+        print("Error in getDailyRain() - failed get() request")
         return(ERR_FAILED_GET)
         
 def getPressure():
     i = 0
     while i < len(WU_STATIONS):  # loops through stations in WU_STATIONS list
+
         # Get pressure from nearby station
         getUrl = "http://api.wunderground.com/api/{}/geolookup/conditions/q/pws:{}.json".format(WU_credentials.WU_API_KEY, WU_STATIONS[i])
         if (i > 0):
             print(getUrl) #srg debug
 
         try:
-            response = requests.get(getUrl, timeout=5).json()
+            response = requests.get(getUrl, timeout=10).json()
             if len(response) > 1: # valid response returns 3, if there's an error, the len() is 1
                 if isNumber(response['current_observation']['pressure_in']):
                     nearby_pressure = float(response['current_observation']['pressure_in'])
@@ -62,8 +63,8 @@ def getPressure():
             i = i + 1
             time.sleep(10)
 
-        except:
-            print("Error in WU_download.py getPressure(), failed get request for station {}".format(WU_STATIONS[i]))
+        except Exception:
+            print("Error in getPressure(), failed get() request for station {}".format(WU_STATIONS[i]))
             i = i + 1
             if (i >= len(WU_STATIONS)):
                 return(ERR_FAILED_GET)
@@ -72,7 +73,6 @@ def getPressure():
     # Couldn't get pressure, return an error
     return(ERR_INVALID_DATA)
         
-
 
 # Checks to see if a string is numeric
 def isNumber(str):
@@ -84,5 +84,3 @@ def isNumber(str):
 
 
     
-
-

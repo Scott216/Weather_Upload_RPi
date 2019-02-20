@@ -31,8 +31,11 @@
 # 01/21/19 v1.12 - in WU_decodeWirelessData.py, fixed temperature() to return negative numbers properly
 # 02/02/19 v1.13 - Added wind chill, removed dewPointLocal()
 # 02/11/19 v1.14 - Switched from test station to Suntec station
+# 02/17/19 v1.15 - changed timeout in WU_download.py from 5 to 10
+# 02/18/19 v1.16 - Changed except errors in WU_Upload.py and changed timeout from 5 to 30
 
-version = "v1.14" 
+
+version = "v1.16"
 
 import time
 import smbus  # Used by I2C
@@ -356,10 +359,11 @@ while True:
                 decodeStatus = decodeRawData(g_rawDataNew) # send packet to decodeRawData() for decoding
                 if decodeStatus == False:
                     print("Error decoding data")
-                 
+
         except OSError:
             g_i2cErrorCnt += 1
-            print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
+            if (g_i2cErrorCnt > 10):
+                print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
             time.sleep(10)
 
     #if it's a new day, reset daily rain accumulation and I2C Error counter
