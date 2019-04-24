@@ -17,7 +17,7 @@ def upload2WU(weatherData, stationID):
     WU_creds = 'ID={}&PASSWORD={}'.format(stationID, WU_credentials.WU_PASSWORD)
     WU_software = "&softwaretype=RPi-Moteino"
     WU_action = "&action=updateraw&realtime=1" # &rtfreq=" + str(UploadFreqSeconds)
-    
+
     # Assemble URL to send to WU
     full_URL = WU_url + WU_creds + "&dateutc=now" 
     if weatherData.gotWindDirData():

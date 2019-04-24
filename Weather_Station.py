@@ -33,9 +33,10 @@
 # 02/11/19 v1.14 - Switched from test station to Suntec station
 # 02/17/19 v1.15 - changed timeout in WU_download.py from 5 to 10
 # 02/18/19 v1.16 - Changed except errors in WU_Upload.py and changed timeout from 5 to 30
+# 04/23/19 v1.17 - Can't get pressure from other weather stations because Weather Underground turned off their API. Removed code that grabs pressure
+# 04/24/19 v1.18 - Updated WU_download.getDailyRain() and getPressure() to work with new API.  Got new API key and updated WU_credentials.py
 
-
-version = "v1.16"
+version = "v1.18"
 
 import time
 import smbus  # Used by I2C
@@ -99,13 +100,13 @@ newRainToday = WU_download.getDailyRain()
 if newRainToday >= 0:
     suntec.rainToday = newRainToday
 else:
-    print("Error getting rain data on startup")
+    print("Error getting rain data on startup: {}".format(newRainToday))
 
 newPressure = WU_download.getPressure()
 if newPressure > 25:
-    suntec.pressure = newPressure
+   suntec.pressure = newPressure
 else:
-    print("Error getting pressure data on startup")
+   print("Error getting pressure data on startup")
 
 i2c_bus = smbus.SMBus(1)  # for I2C
 
@@ -377,9 +378,9 @@ while True:
     # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp and R/H)
     # then upload new data to Weather Underground
     if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
-        newPressure =  WU_download.getPressure() # get latest pressure from local weather station
+        newPressure = WU_download.getPressure() # get latest pressure from local weather station
         if (newPressure > 25):
-            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update date, if not, no nothing and last valid reading will be used
+            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data, if not, do nothing and last valid reading will be used
         printWeatherDataTable()
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
         if uploadStatus == True:
