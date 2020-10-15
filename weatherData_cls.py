@@ -65,7 +65,7 @@ class weatherStation:
         return (self.rainRate > weatherStation.NO_DATA_YET)
 
     def gotRainTodayData(self):
-        return (self.rainToday > weatherStation.NO_DATA_YET)
+        return (self.rainToday >= 0.0)
 
     def gotDewPointData(self):
         return ( (self.dewPoint > weatherStation.NO_DATA_YET) and self.gotHumidityData() and self.gotTemperatureData())
@@ -166,6 +166,6 @@ class weatherStation:
             self.windChill = (self.outsideTemp * 0.6215) - (35.75 * self.windSpeed**0.16) + (0.4275 * self.outsideTemp * self.windSpeed**0.16) + 35.74
             return(self.windChill)
         else:
-            suntec.windChill = weatherStation.NO_DATA_YET
+            suntec.windChill = self.outsideTemp
             return (weatherStation.NO_DATA_YET)
 

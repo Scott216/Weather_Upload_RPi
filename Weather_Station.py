@@ -5,19 +5,17 @@
 
 
 # To Do
-# Get Pressure sensor and connect to RPi instead of getting pressure from another staiton
+# Get Pressure sensor and connect to RPi instead of getting pressure from another station
 #   https://tutorials-raspberrypi.com/raspberry-pi-and-i2c-air-pressure-sensor-bmp180
-#   Better sonsor is BMP280
-# Calculate and upload wind chill
-#   Wind Chill = (Temp * 0.6215) - (35.75 * windspeed**0.16) + (0.4275 * Temp * windspeed**0.16) + 35.74
-
+#   Better sonsor is BME280
+# If not getting wireless data, then don't send data to WU
 
 
 # Change Log
 # 11/28/18 v1.00 - Initial RPi version
-# 12/27/18 v1.01 - changed I/O pins
+# 12/27/18 v1.01 - Changed I/O pins
 # 12/31/18 v1.02 - Added packet printout in hex to data table
-# 01/01/19 v1.03 - removed Cap voltage from printout.  Fixed wind gust error in URL
+# 01/01/19 v1.03 - Removed Cap voltage from printout.  Fixed wind gust error in URL
 # 01/02/19 v1.04 - changed WU upload timing. Added wind direction logging.  Added I2C error counter
 # 01/03/19 v1.05 - Fixed bug in avgWindDir(), didn't have "self" infront of the arrays
 # 01/03/19 v1.06 - Removed wind direction logging.  Added comments
@@ -28,19 +26,26 @@
 # 01/06/19 v1.09 - Moved new day reset to main loop
 # 01/06/19 v1.10 - Used .format() with getUrl string in WU_download.py. Changed primary station for getting pressure data
 # 01/07/19 v1.11 - Changed pressure upload so it would return last valid pressure instead of nothing. WU treats no data as zero
-# 01/21/19 v1.12 - in WU_decodeWirelessData.py, fixed temperature() to return negative numbers properly
+# 01/21/19 v1.12 - In WU_decodeWirelessData.py, fixed temperature() to return negative numbers properly
 # 02/02/19 v1.13 - Added wind chill, removed dewPointLocal()
 # 02/11/19 v1.14 - Switched from test station to Suntec station
-# 02/17/19 v1.15 - changed timeout in WU_download.py from 5 to 10
+# 02/17/19 v1.15 - Changed timeout in WU_download.py from 5 to 10
 # 02/18/19 v1.16 - Changed except errors in WU_Upload.py and changed timeout from 5 to 30
 # 04/23/19 v1.17 - Can't get pressure from other weather stations because Weather Underground turned off their API. Removed code that grabs pressure
 # 04/24/19 v1.18 - Updated WU_download.getDailyRain() and getPressure() to work with new API.  Got new API key and updated WU_credentials.py
+# 10/13/20 v1.19 - in WU_download.py I changed download station KVTDOVER7 (Mt Snow base) to KVTDOVER19 becuase DVTDOVER7 is offline.
+#                  Changed KVTDOVER8 to KVTDOVER25. In startup, added suntec.rainToday = 0 if error in getting rain.
+#                  Changed  gotRainTodayData() to check >= zero instead of NO_DATA_YET
+#                  Installed Adafruit BME280 module: "sudo pip3 install Adafruit_BME280"
+# 10/14/20 v1.20 - Added time since last successful upload output when upload fails
+# 10/15/20 v1.21 - Added code to reset Moteino if I2C errors reach 50
 
-version = "v1.18"
+version = "v1.21"
 
 import time
 import smbus  # Used by I2C
 import math # Used by humidity calculation
+import Adafruit_BME280  # https://github.com/adafruit/Adafruit_BME280_Library, to install: "sudo pip3 install Adafruit_BME280"
 import RPi.GPIO as GPIO # reads/writes GPIO pins
 import WU_credentials # Weather underground password, API key and station IDs
 import WU_download  # downloads daily rain on startup, and pressure from other weather staitons
@@ -83,7 +88,7 @@ g_TableHeaderCntr1 = 0 # used to print header for weather data summary every so 
 g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send data to RPi
 g_i2cErrorCnt = 0 # Daily counter for I2C errors
 
-g_uploadFreq = 10 # seconds between uploads to Weather Underground
+g_uploadFreqWU = 10 # seconds between uploads to Weather Underground
 
 tmr_upload = time.time()  # Initialize timer to trigger when to upload to Weather Underground
 
@@ -95,6 +100,11 @@ IP = check_output(['hostname', '-I'])
 print("RPi IP Address: {}".format(IP))
 print(version)
 
+
+# Set to zero, weatherStation class initially sets these to -100 for No Data yet
+suntec.windGust = 0.0
+suntec.rainToday = 0.0
+
 # get daily rain data from weather station
 newRainToday = WU_download.getDailyRain()
 if newRainToday >= 0:
@@ -102,6 +112,7 @@ if newRainToday >= 0:
 else:
     print("Error getting rain data on startup: {}".format(newRainToday))
 
+# get pressure from other nearby weather stations
 newPressure = WU_download.getPressure()
 if newPressure > 25:
    suntec.pressure = newPressure
@@ -112,13 +123,13 @@ i2c_bus = smbus.SMBus(1)  # for I2C
 
 # Setup GPIO using Board numbering (vs BCM numbering)
 GPIO.setmode(GPIO.BOARD)
+
 # setup pin as input with pull down resistor
 GPIO.setwarnings(False) 
 GPIO.setup(MOTEINO_HEARTBEAT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(MOTEINO_READY_PIN,     GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(MOTEINO_RESET_PIN,     GPIO.OUT)
 GPIO.output(MOTEINO_RESET_PIN, 1) # set pin high. Moteino resets when it's pin is grounded
-
 
 g_heartbeatNew = GPIO.input(MOTEINO_HEARTBEAT_PIN)
 g_heartbeatOld = g_heartbeatNew
@@ -130,7 +141,7 @@ g_oldDayOfMonth = int(time.strftime("%d"))
 
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
 
-
+q_uploadSuccessTime = 0  # used to hold timestamp of last successful upload 
 
 #---------------------------------------------------------------------
 # Decode weather data from wireless packet
@@ -262,6 +273,20 @@ def decodeRawData(packet):
 
 
 #---------------------------------------------------------------------
+# Get Pressure from BME280 sensor
+#---------------------------------------------------------------------
+def getAtmosphericPressure():
+# Create BME280 object
+
+# Adafruit Github code
+#  https://github.com/adafruit/Adafruit_IO_Python/blob/master/examples/basics/environmental_monitor.py
+    bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c)
+    bme280.sea_level_pressure = 1013.25
+# Read BME280 pressure
+    suntec.pressure = bme280.pressure    
+
+
+#---------------------------------------------------------------------
 # Prints uploaded weather data
 #---------------------------------------------------------------------
 def printWeatherDataTable():
@@ -272,7 +297,7 @@ def printWeatherDataTable():
     
     windDirNow = (g_rawDataNew[2] * 1.40625) + 0.3
     
-    strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\t\ttime'
+    strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\ttime stamp\t\t raw wireless data'
     strSummary = '{0.outsideTemp}\t{0.humidity}\t{0.pressure}\t {0.windSpeed}\t {0.windGust}\t {1:03.0f}\t{0.windDir:03.0f}\t{0.rainRate:.2f}\t{0.rainToday:.2f}\t {0.dewPoint:.2f}\t' \
                  .format(suntec, windDirNow) + time.strftime("%m/%d/%Y %H:%M:%S")
     strSummary = strSummary + "   " + ''.join(['%02x ' %b for b in g_rawDataNew]) + "("  + dataType[g_rawDataNew[0] >> 4] + ")"
@@ -365,7 +390,10 @@ while True:
             g_i2cErrorCnt += 1
             if (g_i2cErrorCnt > 10):
                 print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
-            time.sleep(10)
+            time.sleep(10) # sleep for 10 seconds
+            if (g_i2cErrorCnt > 50):
+                print("High I2C Errors, resetting Moteino")
+                resetMoteino()
 
     #if it's a new day, reset daily rain accumulation and I2C Error counter
     newDayOfMonth = int(time.strftime("%d"))
@@ -384,9 +412,10 @@ while True:
         printWeatherDataTable()
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
         if uploadStatus == True:
-            tmr_upload = time.time() + g_uploadFreq # set next upload time
+            q_uploadSuccessTime = time.time() 
+            tmr_upload = time.time() + g_uploadFreqWU # set next upload time
         else:
-            print("Upload to WU failed") 
+            print("Upload to WU failed.  Last successful uplaod: {:.1f} minutes ago".format((time.time() - q_uploadSuccessTime)/60)) 
 
 
 GPIO.cleanup() # used when exiting a program to reset the pins
