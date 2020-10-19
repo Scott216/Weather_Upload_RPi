@@ -8,7 +8,12 @@
 # Get Pressure sensor and connect to RPi instead of getting pressure from another station
 #   https://tutorials-raspberrypi.com/raspberry-pi-and-i2c-air-pressure-sensor-bmp180
 #   Better sonsor is BME280
-# If not getting wireless data, then don't send data to WU
+# Track some operating stats and print out every 10 minutes
+#   - Number uploads to w/u
+#   - Average time between uploads over the last hour
+#   - Number upload errors in the last hour
+#   - Number of I2C errors in the last hour
+#   - Average time to read ISS data from weather station in the last hour
 
 
 # Change Log
@@ -39,8 +44,9 @@
 #                  Installed Adafruit BME280 module: "sudo pip3 install Adafruit_BME280"
 # 10/14/20 v1.20 - Added time since last successful upload output when upload fails
 # 10/15/20 v1.21 - Added code to reset Moteino if I2C errors reach 50
+# 10/16/20 v1.22 - Fixed bug in resetting Moteino when I2C is high.  Added option to select whether to print raw data or not
 
-version = "v1.21"
+version = "v1.22"
 
 import time
 import smbus  # Used by I2C
@@ -59,12 +65,12 @@ ISS_STATION_ID = 1
 WU_STATION = WU_credentials.WU_STATION_ID_SUNTEC # Main weather station
 # WU_STATION = WU_credentials.WU_STATION_ID_TEST # Test weather station
 
-# Instantiate suntec object from weatherStation class
+# Instantiate suntec object from weatherStation class (weatherData_cls.py)
 suntec = weatherData_cls.weatherStation(ISS_STATION_ID)
 
 # Header byte 0, 4 MSB describe data in bytes 3-4
 ISS_CAP_VOLTS    = 0x2
-ISS_UV_INDEX     = 0x4
+ISS_UV_INDEX     = 0x4d
 ISS_RAIN_SECONDS = 0x5
 ISS_SOLAR_RAD    = 0x6
 ISS_OUT_TEMP     = 0x8
@@ -89,8 +95,6 @@ g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send 
 g_i2cErrorCnt = 0 # Daily counter for I2C errors
 
 g_uploadFreqWU = 10 # seconds between uploads to Weather Underground
-
-tmr_upload = time.time()  # Initialize timer to trigger when to upload to Weather Underground
 
 
 #---------------------------------------------------------------------
@@ -141,7 +145,10 @@ g_oldDayOfMonth = int(time.strftime("%d"))
 
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
 
-q_uploadSuccessTime = 0  # used to hold timestamp of last successful upload 
+tmr_upload = time.time()  # Initialize timer to trigger when to upload to Weather Underground
+
+q_uploadSuccessTime = tmr_upload  # used to hold timestamp of last successful upload. Setting this to current time so program can calculate
+                                  # how ong it takes for first block of data to come in from weather station on startup
 
 #---------------------------------------------------------------------
 # Decode weather data from wireless packet
@@ -233,6 +240,7 @@ def decodeRawData(packet):
         if newTemp > -100: #If no error
             suntec.outsideTemp = newTemp
             suntec.calcWindChill() # calculate windchill
+            # If we have R/H too, then calculate dew point
             if suntec.gotHumidityData():
                 newDewPoint = suntec.calcDewPoint() # Calculate dew point
                 if (newDewPoint <= -100): 
@@ -256,8 +264,14 @@ def decodeRawData(packet):
         newHumidity = WU_decodeWirelessData.humidity(packet)
         if newHumidity > 0:
             suntec.humidity = newHumidity
+            # If we have outside temperature too, then calculate dew point
+            if suntec.gotTemperatureData():
+                newDewPoint = suntec.calcDewPoint() # Calculate dew point
+                if (newDewPoint <= -100): 
+                    print('Invalid dewpoint: {} from temp={} and humidity={}'.format(newDewPoint, suntec.outsideTemp, suntec.humidity))
+
             return(True)
-        print('Invalid RG. Got {} from {}'.format(newHumidity, packet))
+        print('Invalid humidity. Got {} from {}'.format(newHumidity, packet))
         return(False)
 
     # Returns capicator voltage
@@ -289,7 +303,7 @@ def getAtmosphericPressure():
 #---------------------------------------------------------------------
 # Prints uploaded weather data
 #---------------------------------------------------------------------
-def printWeatherDataTable():
+def printWeatherDataTable(printRawData=None):
 
     global g_TableHeaderCntr1
     dataType = ["0x0", "0x1", "Super Cap", "0x3", "UV Index", "Rain Seconds", "Solar Radiation", "Solar Cell Volts", \
@@ -297,10 +311,13 @@ def printWeatherDataTable():
     
     windDirNow = (g_rawDataNew[2] * 1.40625) + 0.3
     
-    strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\ttime stamp\t\t raw wireless data'
+    strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\ttime stamp'
     strSummary = '{0.outsideTemp}\t{0.humidity}\t{0.pressure}\t {0.windSpeed}\t {0.windGust}\t {1:03.0f}\t{0.windDir:03.0f}\t{0.rainRate:.2f}\t{0.rainToday:.2f}\t {0.dewPoint:.2f}\t' \
                  .format(suntec, windDirNow) + time.strftime("%m/%d/%Y %H:%M:%S")
-    strSummary = strSummary + "   " + ''.join(['%02x ' %b for b in g_rawDataNew]) + "("  + dataType[g_rawDataNew[0] >> 4] + ")"
+
+    if (printRawData == True):
+        strHeader = strHeader + '\t\t raw wireless data'
+        strSummary = strSummary + "   " + ''.join(['%02x ' %b for b in g_rawDataNew]) + "("  + dataType[g_rawDataNew[0] >> 4] + ")"
     
     if (g_TableHeaderCntr1 == 0):
         print(strHeader)
@@ -368,6 +385,9 @@ def resetMoteino():
 #---------------------------------------------------------------------
 while True:
 
+    dataTypedebug = ["0x0", "0x1", "Super Cap", "0x3", "UV Index", "Rain Seconds", "Solar Radiation", "Solar Cell Volts", \
+                "Temperature", "Gusts", "Humidity", "0xB", "0xC", "0xD", "Rain Counter", "0xF"]
+
     g_moteinoReady = GPIO.input(MOTEINO_READY_PIN) # Moteino will set output pin high when it wants to send data to RPi
     decodeStatus = False # Reset status
     
@@ -381,17 +401,26 @@ while True:
         # Exception handler for: OSError: [Errno 5] Input/output error. This occures when Moteino is rebooted
         try:
             g_rawDataNew = i2c_bus.read_i2c_block_data(I2C_ADDRESS, 0, 8)  # Get data from Moteino, 0 byte offset, get 8 bytes
+
+            print("{}  elapsed time {:0.1f}".format(dataTypedebug[g_rawDataNew[0] >> 4], time.time() - q_uploadSuccessTime)) # srgdebug
+
             if (g_rawDataNew != rawDataOld): # see if new data has changed
                 decodeStatus = decodeRawData(g_rawDataNew) # send packet to decodeRawData() for decoding
                 if decodeStatus == False:
-                    print("Error decoding data")
+                    print("Error decoding ISS packet data")
 
+                ## srgdebug
+                if (decodeStatus == True) and (tmr_upload == q_uploadSuccessTime):   # this should only be true one time, right after first time RPi received good data from Moteino
+                    print("Got ISS data. It took {:.0f} seconds".format(time.time() - q_uploadSuccessTime))
+                    print("suntec.gotDewPointData()={}, time.time() - tmr_upload = {:.3f}".format(suntec.gotDewPointData(), time.time() - tmr_upload))
+                    printWeatherDataTable(printRawData=True)
+                    
         except OSError:
             g_i2cErrorCnt += 1
             if (g_i2cErrorCnt > 10):
                 print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
             time.sleep(10) # sleep for 10 seconds
-            if (g_i2cErrorCnt > 50):
+            if (g_i2cErrorCnt == 50):
                 print("High I2C Errors, resetting Moteino")
                 resetMoteino()
 
@@ -403,13 +432,13 @@ while True:
         g_i2cErrorCnt = 0
             
                   
-    # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp and R/H)
-    # then upload new data to Weather Underground
+    # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
+    # and R/H) then upload new data to Weather Underground
     if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
         newPressure = WU_download.getPressure() # get latest pressure from local weather station
         if (newPressure > 25):
-            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data, if not, do nothing and last valid reading will be used
-        printWeatherDataTable()
+            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
+        printWeatherDataTable(printRawData=False) # can select to print raw data or not
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
         if uploadStatus == True:
             q_uploadSuccessTime = time.time() 
