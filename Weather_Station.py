@@ -8,12 +8,12 @@
 # Get Pressure sensor and connect to RPi instead of getting pressure from another station
 #   https://tutorials-raspberrypi.com/raspberry-pi-and-i2c-air-pressure-sensor-bmp180
 #   Better sonsor is BME280
-# Track some operating stats and print out every 10 minutes
-#   - Number uploads to w/u
-#   - Average time between uploads over the last hour
-#   - Number upload errors in the last hour
-#   - Number of I2C errors in the last hour
-#   - Average time to read ISS data from weather station in the last hour
+# Track some operating stats and print out every hour
+#   - write to a log file
+# Cron jobs
+#   - Start weather station on bootup
+#   - Reboot RPi if weather station program stops hangs
+# Reboot Motieno after 10 consecutive errors and after 100 errors
 
 
 # Change Log
@@ -45,8 +45,10 @@
 # 10/14/20 v1.20 - Added time since last successful upload output when upload fails
 # 10/15/20 v1.21 - Added code to reset Moteino if I2C errors reach 50
 # 10/16/20 v1.22 - Fixed bug in resetting Moteino when I2C is high.  Added option to select whether to print raw data or not
+# 10/19/20 v1.23 - Removed some debugging code.  Moved startup section next to main.  Added I2C consecutive error counter.
+#                  Added resetMoteino() to startup section.
 
-version = "v1.22"
+version = "v1.23"
 
 import time
 import smbus  # Used by I2C
@@ -84,71 +86,6 @@ MOTEINO_READY_PIN         = 33  # Input pin connected to Moteino output pin that
 MOTEINO_RESET_PIN         = 36  # Output pin connected to Moteino Reset pin (BCM 16)
 
 
-g_rainCounterOld = 0   # Previous value of rain counter, used in def decodeRawData()
-g_rainCntDataPts = 0   # Counts the times RPi has received rain counter data, this is not the actual rain counter, thats g_rainCounterOld and rainCounterNew
-
-g_rawDataNew = [0.0] * 8 # initialize rawData list. This is weather data that's sent from Moteino
-
-g_TableHeaderCntr1 = 0 # used to print header for weather data summary every so often
-
-g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send data to RPi
-g_i2cErrorCnt = 0 # Daily counter for I2C errors
-
-g_uploadFreqWU = 10 # seconds between uploads to Weather Underground
-
-
-#---------------------------------------------------------------------
-# Start up 
-#---------------------------------------------------------------------
-IP = check_output(['hostname', '-I'])
-print("RPi IP Address: {}".format(IP))
-print(version)
-
-
-# Set to zero, weatherStation class initially sets these to -100 for No Data yet
-suntec.windGust = 0.0
-suntec.rainToday = 0.0
-
-# get daily rain data from weather station
-newRainToday = WU_download.getDailyRain()
-if newRainToday >= 0:
-    suntec.rainToday = newRainToday
-else:
-    print("Error getting rain data on startup: {}".format(newRainToday))
-
-# get pressure from other nearby weather stations
-newPressure = WU_download.getPressure()
-if newPressure > 25:
-   suntec.pressure = newPressure
-else:
-   print("Error getting pressure data on startup")
-
-i2c_bus = smbus.SMBus(1)  # for I2C
-
-# Setup GPIO using Board numbering (vs BCM numbering)
-GPIO.setmode(GPIO.BOARD)
-
-# setup pin as input with pull down resistor
-GPIO.setwarnings(False) 
-GPIO.setup(MOTEINO_HEARTBEAT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(MOTEINO_READY_PIN,     GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
-GPIO.setup(MOTEINO_RESET_PIN,     GPIO.OUT)
-GPIO.output(MOTEINO_RESET_PIN, 1) # set pin high. Moteino resets when it's pin is grounded
-
-g_heartbeatNew = GPIO.input(MOTEINO_HEARTBEAT_PIN)
-g_heartbeatOld = g_heartbeatNew
-g_lastHeartbeatTime = time.time() 
-
-
-# Initialize day of month variable, used to detect when new day starts
-g_oldDayOfMonth = int(time.strftime("%d"))   
-
-g_tmr_Moteino = time.time()  # Used to request data from moteino every second
-
-tmr_upload = time.time()  # Initialize timer to trigger when to upload to Weather Underground
-
-q_uploadSuccessTime = tmr_upload  # used to hold timestamp of last successful upload. Setting this to current time so program can calculate
-                                  # how ong it takes for first block of data to come in from weather station on startup
 
 #---------------------------------------------------------------------
 # Decode weather data from wireless packet
@@ -381,12 +318,84 @@ def resetMoteino():
 
 
 #---------------------------------------------------------------------
+# Start up 
+#---------------------------------------------------------------------
+IP = check_output(['hostname', '-I'])
+print("RPi IP Address: {}".format(IP))
+print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %H:%M:%S")))
+
+
+
+# Set to zero, weatherStation class initially sets these to -100 for No Data yet
+suntec.windGust = 0.0
+suntec.rainToday = 0.0
+
+# get daily rain data from weather station
+newRainToday = WU_download.getDailyRain()
+if newRainToday >= 0:
+    suntec.rainToday = newRainToday
+else:
+    print("Error getting rain data on startup: {}".format(newRainToday))
+
+# get pressure from other nearby weather stations
+newPressure = WU_download.getPressure()
+if newPressure > 25:
+   suntec.pressure = newPressure
+else:
+   print("Error getting pressure data on startup")
+
+i2c_bus = smbus.SMBus(1)  # for I2C
+
+# Setup GPIO using Board numbering (vs BCM numbering)
+GPIO.setmode(GPIO.BOARD)
+
+# setup pin as input with pull down resistor
+GPIO.setwarnings(False) 
+GPIO.setup(MOTEINO_HEARTBEAT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(MOTEINO_READY_PIN,     GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+GPIO.setup(MOTEINO_RESET_PIN,     GPIO.OUT)
+GPIO.output(MOTEINO_RESET_PIN, 1) # set pin high. Moteino resets when it's pin is grounded
+
+resetMoteino()
+
+g_heartbeatNew = GPIO.input(MOTEINO_HEARTBEAT_PIN)
+g_heartbeatOld = g_heartbeatNew
+g_lastHeartbeatTime = time.time() 
+
+g_rainCounterOld = 0   # Previous value of rain counter, used in def decodeRawData()
+g_rainCntDataPts = 0   # Counts the times RPi has received rain counter data, this is not the actual rain counter, thats g_rainCounterOld and rainCounterNew
+
+g_rawDataNew = [0.0] * 8 # initialize rawData list. This is weather data that's sent from Moteino
+
+g_TableHeaderCntr1 = 0 # used to print header for weather data summary every so often
+
+g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send data to RPi
+g_i2cErrorCnt = 0 # Daily counter for I2C errors
+g_i2cErrorCntConsecutive = 0 # consecutive I2C errors
+
+g_uploadFreqWU = 10 # seconds between uploads to Weather Underground
+
+g_oldDayOfMonth = int(time.strftime("%d"))   # Initialize day of month variable, used to detect when new day starts
+g_tmr_Moteino = time.time()  # Used to request data from moteino every second
+tmr_upload = time.time()     # Initialize timer to trigger when to upload to Weather Underground
+g_uploadSuccessTime = tmr_upload  # Used to hold timestamp of last successful upload. Setting this to current time so program can calculate
+                                  # how ong it takes for first block of data to come in from weather station on startup
+
+
+# variables for keeping track of stats per hour
+cntUploadSuccess = 0
+cntUploadFailures = 0
+cntI2CSuccess =    0
+cntI2CFailures =   0
+hourtimer = time.time() +  3600 
+
+
+#---------------------------------------------------------------------
 # Main loop
 #---------------------------------------------------------------------
 while True:
 
-    dataTypedebug = ["0x0", "0x1", "Super Cap", "0x3", "UV Index", "Rain Seconds", "Solar Radiation", "Solar Cell Volts", \
-                "Temperature", "Gusts", "Humidity", "0xB", "0xC", "0xD", "Rain Counter", "0xF"]
+    
 
     g_moteinoReady = GPIO.input(MOTEINO_READY_PIN) # Moteino will set output pin high when it wants to send data to RPi
     decodeStatus = False # Reset status
@@ -401,27 +410,23 @@ while True:
         # Exception handler for: OSError: [Errno 5] Input/output error. This occures when Moteino is rebooted
         try:
             g_rawDataNew = i2c_bus.read_i2c_block_data(I2C_ADDRESS, 0, 8)  # Get data from Moteino, 0 byte offset, get 8 bytes
-
-            print("{}  elapsed time {:0.1f}".format(dataTypedebug[g_rawDataNew[0] >> 4], time.time() - q_uploadSuccessTime)) # srgdebug
-
+            cntI2CSuccess += 1
+            g_i2cErrorCntConsecutive = 0
             if (g_rawDataNew != rawDataOld): # see if new data has changed
                 decodeStatus = decodeRawData(g_rawDataNew) # send packet to decodeRawData() for decoding
                 if decodeStatus == False:
                     print("Error decoding ISS packet data")
 
-                ## srgdebug
-                if (decodeStatus == True) and (tmr_upload == q_uploadSuccessTime):   # this should only be true one time, right after first time RPi received good data from Moteino
-                    print("Got ISS data. It took {:.0f} seconds".format(time.time() - q_uploadSuccessTime))
-                    print("suntec.gotDewPointData()={}, time.time() - tmr_upload = {:.3f}".format(suntec.gotDewPointData(), time.time() - tmr_upload))
-                    printWeatherDataTable(printRawData=True)
-                    
-        except OSError:
+        except OSError:  # Got an I2C error
             g_i2cErrorCnt += 1
+            cntI2CFailures += 1
+            g_i2cErrorCntConsecutive += 1
             if (g_i2cErrorCnt > 10):
-                print("I2C Error, errors today: {}".format(g_i2cErrorCnt))
+                print("I2C Error, errors today: {}. Consecutive errors {}".format(g_i2cErrorCnt, g_i2cErrorCntConsecutive))
             time.sleep(10) # sleep for 10 seconds
-            if (g_i2cErrorCnt == 50):
-                print("High I2C Errors, resetting Moteino")
+            # Reset Moteino after every 10 consecutive errors
+            if (g_i2cErrorCntConsecutive % 10 == 0):
+                print("High I2C errors, resetting Moteino")
                 resetMoteino()
 
     #if it's a new day, reset daily rain accumulation and I2C Error counter
@@ -430,8 +435,9 @@ while True:
         suntec.rainToday = 0.0
         g_oldDayOfMonth = newDayOfMonth
         g_i2cErrorCnt = 0
-            
-                  
+        g_i2cErrorCntConsecutive = 0
+
+
     # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
     # and R/H) then upload new data to Weather Underground
     if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
@@ -441,11 +447,23 @@ while True:
         printWeatherDataTable(printRawData=False) # can select to print raw data or not
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
         if uploadStatus == True:
-            q_uploadSuccessTime = time.time() 
-            tmr_upload = time.time() + g_uploadFreqWU # set next upload time
+            g_uploadSuccessTime = time.time()
+            tmr_upload = time.time() + g_uploadFreqWU # set next upload time 
+            cntUploadSuccess += 1
         else:
-            print("Upload to WU failed.  Last successful uplaod: {:.1f} minutes ago".format((time.time() - q_uploadSuccessTime)/60)) 
+            print("Upload to WU failed.  Last successful uplaod: {:.1f} minutes ago".format((time.time() - g_uploadSuccessTime)/60)) 
+            cntUploadFailures += 1
 
+    # Every hour reset performance stats
+    if (time.time() > hourtimer):
+        print("Upload Successes:{}, Failures: {}; I2C Succeses: {}, Failures:{}".format(cntUploadSuccess, cntUploadFailures, cntI2CSuccess, cntI2CFailures)) 
+        cntUploadSuccess = 0
+        cntUploadFailures = 0
+        cntI2CSuccess = 0
+        cntI2CFailures = 0
+        hourtimer = time.time() + 3600
+    
+        
 
 GPIO.cleanup() # used when exiting a program to reset the pins
 
