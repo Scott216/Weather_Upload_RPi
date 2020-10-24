@@ -1,19 +1,14 @@
 # Uses Moteino to get wireless weather data from Davis ISS weather station
-# and sends it to weather underground
+# and sends it to Weather Underground
 # Git Repo: https://github.com/Scott216/Weather_Upload_RPi
 
 
 
 # To Do
 # Get Pressure sensor and connect to RPi instead of getting pressure from another station
-#   https://tutorials-raspberrypi.com/raspberry-pi-and-i2c-air-pressure-sensor-bmp180
-#   Better sonsor is BME280
-# Track some operating stats and print out every hour
-#   - write to a log file
 # Cron jobs
 #   - Start weather station on bootup
-#   - Reboot RPi if weather station program stops hangs
-# Reboot Motieno after 10 consecutive errors and after 100 errors
+#   - Reboot RPi if weather station program stops 
 
 
 # Change Log
@@ -47,11 +42,16 @@
 # 10/16/20 v1.22 - Fixed bug in resetting Moteino when I2C is high.  Added option to select whether to print raw data or not
 # 10/19/20 v1.23 - Removed some debugging code.  Moved startup section next to main.  Added I2C consecutive error counter.
 #                  Added resetMoteino() to startup section.
+# 10/20/20 v1.24 - Write data to a log file.  Changed timing of getPressure to every hour. I think I'm hitting WU limits.  Also changed
+#                  WU upload from 10 to 60 seconds.
+# 10/21/20 v1.25 - Redid log files do new file is created every day, one for weather data and one for errors
+# 10/22/20 v1.26 - Redid upload2WU() and getDailyRain() so they return a list so that error message can be sent back to main program
 
-version = "v1.23"
+version = "v1.26"
 
 import time
 import smbus  # Used by I2C
+import os.path # used to see if a file exist
 import math # Used by humidity calculation
 import Adafruit_BME280  # https://github.com/adafruit/Adafruit_BME280_Library, to install: "sudo pip3 install Adafruit_BME280"
 import RPi.GPIO as GPIO # reads/writes GPIO pins
@@ -250,7 +250,7 @@ def printWeatherDataTable(printRawData=None):
     
     strHeader =  'temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\ttime stamp'
     strSummary = '{0.outsideTemp}\t{0.humidity}\t{0.pressure}\t {0.windSpeed}\t {0.windGust}\t {1:03.0f}\t{0.windDir:03.0f}\t{0.rainRate:.2f}\t{0.rainToday:.2f}\t {0.dewPoint:.2f}\t' \
-                 .format(suntec, windDirNow) + time.strftime("%m/%d/%Y %H:%M:%S")
+                 .format(suntec, windDirNow) + time.strftime("%m/%d/%Y %I:%M:%S %p")
 
     if (printRawData == True):
         strHeader = strHeader + '\t\t raw wireless data'
@@ -262,6 +262,57 @@ def printWeatherDataTable(printRawData=None):
     print(strSummary)
     
     g_TableHeaderCntr1 -= 1
+
+    logFile(False, "Data", strSummary) # append data (first param False if append vs. write) to log file
+
+
+
+#---------------------------------------------------------------------
+# Create or append log files: weather data and errors
+# newFile = True, then a new file will be created;'w' parameter in open()).  This would be at
+# midnight every day, and sometimes when program is restarted.
+# If newFile = False, then data should be appended to existing file; 'a" parameter in open().
+#
+# logType is eather "Data" or "Error"
+#
+# logData is data to be appended to the log file
+#---------------------------------------------------------------------
+def logFile(newFile, logType, logData):
+
+    datafilename =  "Logs/Upload Data_" + time.strftime("%y%m%d") + ".txt"
+    errorfilename = "Logs/Error log_"   + time.strftime("%y%m%d") + ".txt"
+
+    if (newFile == True):
+        # Create new data log file
+        if not os.path.exists(datafilename):
+            # If data log doesn't exist, create it and add header
+            datalog = open(datafilename, "w")
+            strHeader =  "temp\tR/H\tpres\twind\tgust\t dir\tavg\trrate\ttoday\t dew\ttime stamp\n"
+            datalog.write(strHeader)
+            datalog.close()             
+            
+        # Create new error log file
+        if not os.path.exists(errorfilename):
+            # If error log doesn't exist, create it and add header
+            errlog = open(errorfilename, "w")
+            strHeader =  "\n"
+            errlog.write(strHeader)
+            errlog.close()             
+
+    else: # append data to existing log file
+        if(logType == "Data"):
+            # log type is data log
+            datalog = open(datafilename, "a")
+            datalog.write(logData)
+            datalog.write('\n') # Add eol character
+            datalog.close()             
+
+        else: # log type is error log
+            errlog = open(errorfilename, "a")
+            errlog.write(logData)
+            errlog.write(time.strftime("    %m/%d/%Y %I:%M:%S %p\n"))  # Add timestamp and eol character
+            errlog.close()             
+        
     
 #---------------------------------------------------------------------
 # Prints wireless packet data
@@ -295,7 +346,9 @@ def isHeartbeatOK():
         # See how long it's been since the last heartbeat
         heartbeatAge = time.time() - g_lastHeartbeatTime
         if heartbeatAge > heartbeat_timeout:
-            print("No Moteino heartbeat, will reset Moteino")
+            errMsg = "No Moteino heartbeat, will reset Moteino"
+            print(errMsg)
+            logFile(False, "Error", errMsg)
             resetMoteino() # Moteino has locked up, need to reset it
             return(False)
         else:
@@ -321,35 +374,44 @@ def resetMoteino():
 # Start up 
 #---------------------------------------------------------------------
 IP = check_output(['hostname', '-I'])
-print("RPi IP Address: {}".format(IP))
-print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %H:%M:%S")))
+print("RPi IP Address: {}".format(IP)) 
+print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
+# Create log files for data and errors, First Param = True means to create a new file, vs append to a file
+logFile(True, "Data",   "")
+logFile(True, "Errors", "")
 
 
 # Set to zero, weatherStation class initially sets these to -100 for No Data yet
 suntec.windGust = 0.0
 suntec.rainToday = 0.0
 
-# get daily rain data from weather station
-newRainToday = WU_download.getDailyRain()
-if newRainToday >= 0:
-    suntec.rainToday = newRainToday
+# Get daily rain data from weather station
+newRainToday = WU_download.getDailyRain()  # getDailyRain returns a list [0] = success/failure, [1] error message
+if newRainToday[0] >= 0:
+    print('Suntec station daily rain={}'.format(newRainToday[0]))
+    suntec.rainToday = newRainToday[0]
 else:
-    print("Error getting rain data on startup: {}".format(newRainToday))
+    errMsg = "getDailyRain() error: " + newRainToday[1]
+    print(errMsg)
+    logFile(False, "Error", errMsg)
+    
 
-# get pressure from other nearby weather stations
+# Get pressure from other nearby weather stations
 newPressure = WU_download.getPressure()
 if newPressure > 25:
    suntec.pressure = newPressure
 else:
-   print("Error getting pressure data on startup")
+   errMsg = "Error getting pressure data on startup"
+   print(errMsg)
+   logFile(False, "Error", errMsg)
 
 i2c_bus = smbus.SMBus(1)  # for I2C
 
 # Setup GPIO using Board numbering (vs BCM numbering)
 GPIO.setmode(GPIO.BOARD)
 
-# setup pin as input with pull down resistor
+# Setup pin as input with pull-down resistor
 GPIO.setwarnings(False) 
 GPIO.setup(MOTEINO_HEARTBEAT_PIN, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 GPIO.setup(MOTEINO_READY_PIN,     GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
@@ -365,39 +427,47 @@ g_lastHeartbeatTime = time.time()
 g_rainCounterOld = 0   # Previous value of rain counter, used in def decodeRawData()
 g_rainCntDataPts = 0   # Counts the times RPi has received rain counter data, this is not the actual rain counter, thats g_rainCounterOld and rainCounterNew
 
-g_rawDataNew = [0.0] * 8 # initialize rawData list. This is weather data that's sent from Moteino
+g_rawDataNew = [0.0] * 8 # Initialize rawData list. This is weather data that's sent from Moteino
 
-g_TableHeaderCntr1 = 0 # used to print header for weather data summary every so often
+g_TableHeaderCntr1 = 0 # Used to print header for weather data summary every so often
 
 g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send data to RPi
 g_i2cErrorCnt = 0 # Daily counter for I2C errors
-g_i2cErrorCntConsecutive = 0 # consecutive I2C errors
 
-g_uploadFreqWU = 10 # seconds between uploads to Weather Underground
+g_uploadFreqWU = 60 # Seconds between uploads to Weather Underground
 
 g_oldDayOfMonth = int(time.strftime("%d"))   # Initialize day of month variable, used to detect when new day starts
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
 tmr_upload = time.time()     # Initialize timer to trigger when to upload to Weather Underground
-g_uploadSuccessTime = tmr_upload  # Used to hold timestamp of last successful upload. Setting this to current time so program can calculate
-                                  # how ong it takes for first block of data to come in from weather station on startup
+g_uploadSuccessTime = time.time()  # Used to hold timestamp of last successful upload. Setting this to current time so program can calculate
+                                   # how ong it takes for first block of data to come in from weather station on startup
 
 
-# variables for keeping track of stats per hour
+# Variables for keeping track of stats per hour
 cntUploadSuccess = 0
 cntUploadFailures = 0
 cntI2CSuccess =    0
 cntI2CFailures =   0
-hourtimer = time.time() +  3600 
+hourTimer = time.time() + 3600
 
+
+# Only use this until you get pressure sensor installed
+tmr_hourly_pressure = time.time() + 3600
+
+g_gotNewISSDataTimer = time.time()
 
 #---------------------------------------------------------------------
 # Main loop
 #---------------------------------------------------------------------
 while True:
 
+    # Moteino will set output pin high when it wants to send data to RPi
+    if(GPIO.input(MOTEINO_READY_PIN) == 1):
+        g_moteinoReady = True
+    else:
+        g_moteinoReady = False
+        
     
-
-    g_moteinoReady = GPIO.input(MOTEINO_READY_PIN) # Moteino will set output pin high when it wants to send data to RPi
     decodeStatus = False # Reset status
     
     if (g_moteinoReady and (time.time() > g_tmr_Moteino) and isHeartbeatOK()): 
@@ -411,22 +481,30 @@ while True:
         try:
             g_rawDataNew = i2c_bus.read_i2c_block_data(I2C_ADDRESS, 0, 8)  # Get data from Moteino, 0 byte offset, get 8 bytes
             cntI2CSuccess += 1
-            g_i2cErrorCntConsecutive = 0
-            if (g_rawDataNew != rawDataOld): # see if new data has changed
-                decodeStatus = decodeRawData(g_rawDataNew) # send packet to decodeRawData() for decoding
+
+            if (g_rawDataNew != rawDataOld): # See if new data has changed
+                g_gotNewISSDataTimer = time.time()
+                decodeStatus = decodeRawData(g_rawDataNew) # Send packet to decodeRawData() for decoding
                 if decodeStatus == False:
-                    print("Error decoding ISS packet data")
+                    errMsg = "Error decoding ISS packet data"
+                    print(errMsg)
+                    logFile(False, "Error", errMsg)
+
 
         except OSError:  # Got an I2C error
             g_i2cErrorCnt += 1
             cntI2CFailures += 1
-            g_i2cErrorCntConsecutive += 1
-            if (g_i2cErrorCnt > 10):
-                print("I2C Error, errors today: {}. Consecutive errors {}".format(g_i2cErrorCnt, g_i2cErrorCntConsecutive))
-            time.sleep(10) # sleep for 10 seconds
-            # Reset Moteino after every 10 consecutive errors
-            if (g_i2cErrorCntConsecutive % 10 == 0):
-                print("High I2C errors, resetting Moteino")
+            if (g_i2cErrorCnt % 10 == 0):  # Print every 1o errors 
+                errMsg = "I2C Error, errors today: {}".format(g_i2cErrorCnt)
+                print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
+                logFile(False, "Error", errMsg)
+            time.sleep(5) # Sleep for 5 seconds
+
+            # Reset Moteino after every 200 I2C errors errors
+            if (g_i2cErrorCnt % 200 == 0):
+                errMsg = "High I2C errors, resetting Moteino"
+                print(errMsg)
+                logFile(False, "Error", errMsg)
                 resetMoteino()
 
     #if it's a new day, reset daily rain accumulation and I2C Error counter
@@ -435,35 +513,57 @@ while True:
         suntec.rainToday = 0.0
         g_oldDayOfMonth = newDayOfMonth
         g_i2cErrorCnt = 0
-        g_i2cErrorCntConsecutive = 0
+
+        # Create new log files for data and errors, First Param = True means to create a new file (False means append to file)
+        logFile(True, "Data",   "")
+        logFile(True, "Errors", "")
+
+      
+
+#  get pressure from other W/U stations once an hour, once you get BME280 sensor installed, you can get it more frequently
+    if (time.time() > tmr_hourly_pressure):
+        newPressure = WU_download.getPressure() # Get latest pressure from local weather station
+        tmr_hourly_pressure = time.time() + 3600
+        if (newPressure > 25):
+            suntec.pressure = newPressure
 
 
     # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
     # and R/H) then upload new data to Weather Underground
     if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
-        newPressure = WU_download.getPressure() # get latest pressure from local weather station
-        if (newPressure > 25):
-            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
-        printWeatherDataTable(printRawData=False) # can select to print raw data or not
-        uploadStatus = WU_upload.upload2WU(suntec, WU_STATION)
-        if uploadStatus == True:
+#srg        newPressure = WU_download.getPressure() # get latest pressure from local weather station
+#srg        if (newPressure > 25):
+#srg            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
+        printWeatherDataTable(printRawData=False) # print weather data. printRawData parameter deterrmines if raw ISS hex data is also printed.
+        
+        uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.  see: https://bit.ly/37y0gAU 
+        uploadErrMsg = uploadStatus[1]
+        if uploadStatus[0] == True:
             g_uploadSuccessTime = time.time()
-            tmr_upload = time.time() + g_uploadFreqWU # set next upload time 
+            tmr_upload = time.time() + g_uploadFreqWU # Set next upload time 
             cntUploadSuccess += 1
         else:
-            print("Upload to WU failed.  Last successful uplaod: {:.1f} minutes ago".format((time.time() - g_uploadSuccessTime)/60)) 
+            errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful uplaod: {:.1f} minutes ago".format((time.time() - g_uploadSuccessTime)/60)
+            print(errMsg)
+            logFile(False, "Error", errMsg)
             cntUploadFailures += 1
 
-    # Every hour reset performance stats
-    if (time.time() > hourtimer):
-        print("Upload Successes:{}, Failures: {}; I2C Succeses: {}, Failures:{}".format(cntUploadSuccess, cntUploadFailures, cntI2CSuccess, cntI2CFailures)) 
+
+    # Every hour print and then reset some stats for debugging
+    if (time.time() > hourTimer):
+        stats = "\nUpload Successes:{}, Failures: {}; I2C Succeses: {}, Failures:{}\n".format(cntUploadSuccess, cntUploadFailures, cntI2CSuccess, cntI2CFailures)
+        print(stats)
+        logFile(False, "Error", stats)
+        stats = "{:.2f} minutes since weather station sent new data.  Last upload to WU {:.1f} minutes ago".format((time.time() - g_gotNewISSDataTimer)/60, (time.time() - (tmr_upload - g_uploadFreqWU))/60)
+        print(stats)
+        logFile(False, "Error", stats)
+
         cntUploadSuccess = 0
         cntUploadFailures = 0
         cntI2CSuccess = 0
         cntI2CFailures = 0
-        hourtimer = time.time() + 3600
-    
-        
+        hourTimer = time.time() + 3600
+       
 
-GPIO.cleanup() # used when exiting a program to reset the pins
+GPIO.cleanup() # Used when exiting a program to reset the pins
 

@@ -35,7 +35,7 @@ def upload2WU(weatherData, stationID):
     if weatherData.gotPressureData():
         full_URL = full_URL + '&baromin={:.2f}'.format(weatherData.pressure)
     else:
-        full_URL = full_URL + '&baromin=25.00'  # if pressure is ommitted, WU assumes zero, so just enter 25 as a default
+        full_URL = full_URL + '&baromin=29.00'  # if pressure is ommitted, WU assumes zero, so just enter 29 as a default
     if weatherData.gotDewPointData():
         full_URL = full_URL + '&dewptf={:.1f}'.format(weatherData.dewPoint)
     if weatherData.gotHumidityData():
@@ -52,36 +52,37 @@ def upload2WU(weatherData, stationID):
 
         # If uploaded successfully, website will reply with 200
         if r.status_code == 200:
-            return(True)
+            return([True, "No Errors"])
         else:
-            print("Error in upload2WU(): {}  {}".format(r.status_code, r.text))
-            return(False)
+            uploadErrMsg = "HTTP Response:{},  {}".format(r.status_code, r.text)
+            return([False, uploadErrMsg])
+        
     # Info on requests errors:
     #  http://docs.python-requests.org/en/master/_modules/requests/exceptions/
     except requests.exceptions.ConnectionError:
-        print("Error in upload2WU() - ConnectionError")
-        return(False)
+        uploadErrMsg = "ConnectionError"
+        return([False, uploadErrMsg])
 
     except requests.exceptions.HTTPError:
-        print("Error in upload2WU() - HTTPError")
-        return(False)
+        uploadErrMsg = "HTTPError"
+        return([False, uploadErrMsg])
 
     except requests.exceptions.ConnectTimeout:
-        print("Error in upload2WU() - ConnectTimeout")
-        return(False)
+        uploadErrMsg = "ConnectTimeout"
+        return([False, uploadErrMsg])
 
     except requests.exceptions.ReadTimeout:
-        print("Error in upload2WU() - ReadTimeout")
-        return(False)
+        uploadErrMsg = "ReadTimeout"
+        return([False, uploadErrMsg])
 
     except requests.exceptions.RetryError:
-        print("Error in upload2WU() - RetryError")
-        return(False)
+        uploadErrMsg = "RetryError"
+        return([False, uploadErrMsg])
 
     except requests.exceptions.Timeout:
-        print("Error in upload2WU() - Timeout")
-        return(False)
+        uploadErrMsg = "Timeout"
+        return([False, uploadErrMsg])
 
     except Exception:
-        print("Error in upload2WU() - Other")
-        return(False)
+        uploadErrMsg = "Other"
+        return([False, uploadErrMsg])

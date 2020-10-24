@@ -20,7 +20,8 @@ ERR_FAILED_GET   = -103
 # Returns inches of rain since midnight
 def getDailyRain():
     getUrl = "https://api.weather.com/v2/pws/observations/current?stationId={}&format=json&units=e&apiKey={}".format(WU_credentials.WU_STATION_ID_SUNTEC, WU_credentials.WU_API_KEY)
-
+    errMsg = "No Error"
+    
     try:
         response = requests.get(getUrl, timeout=10).json()
 
@@ -28,19 +29,19 @@ def getDailyRain():
             if isNumber(response['observations'][0]['imperial']['precipTotal']):
                 daily_rain = float(response['observations'][0]['imperial']['precipTotal'])
                 if (daily_rain >=0 and daily_rain < 10.0):
-                    print('Suntec station daily rain={}'.format(daily_rain))  
-                    return(daily_rain)
+                    return([daily_rain, errMsg])
                 else:
-                    print('Suntec station daily rain out of bounds: {}'.format(daily_rain))
-                    return(ERR_INVALID_DATA)
+                    errMsg = 'Suntec station daily rain out of bounds: {} inches today'.format(daily_rain)
+                    return([ERR_INVALID_DATA, errMsg])
             else:
                 # if daily rain is zero, WU ruturns "none" as the value, not 0.0
-                return(0) 
-        return(ERR_INVALID_DATA)
+                return([0, errMsg])
+        errMsg = "Invalid HTTP response length"
+        return([ERR_INVALID_DATA, errMsg])
 
     except Exception:
-        print("Error in getDailyRain() - failed get() request")
-        return(ERR_FAILED_GET)
+        errMsg = "Failed get() request"
+        return([ERR_FAILED_GET, errMsg])
         
 def getPressure():
     i = 0
