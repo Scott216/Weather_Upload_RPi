@@ -9,6 +9,10 @@
 # Cron jobs
 #   - Start weather station on bootup
 #   - Reboot RPi if weather station program stops 
+# If WU_download.getDailyRain() fails on startup, the read the rain from the log file
+# Unplug monitor and see if that gives you more options for screen resolution
+# Write log files to a USB thumb drive so you don't burn out MicroSD card with a lot of write operations
+# Reformat error logs so they are in a table format
 
 
 # Change Log
@@ -46,8 +50,9 @@
 #                  WU upload from 10 to 60 seconds.
 # 10/21/20 v1.25 - Redid log files do new file is created every day, one for weather data and one for errors
 # 10/22/20 v1.26 - Redid upload2WU() and getDailyRain() so they return a list so that error message can be sent back to main program
+# 11/02/20 v1.27 - Redid error tracking so output is to log is in a table format
 
-version = "v1.26"
+version = "v1.27"
 
 import time
 import smbus  # Used by I2C
@@ -84,7 +89,6 @@ ISS_RAIN_COUNT   = 0xE
 MOTEINO_HEARTBEAT_PIN     = 18  # Input pin connected to Moteino heartbeat output. (BCM 24)
 MOTEINO_READY_PIN         = 33  # Input pin connected to Moteino output pin that signals Moteino is ready to send data to RPi.  (BDM 13)
 MOTEINO_RESET_PIN         = 36  # Output pin connected to Moteino Reset pin (BCM 16)
-
 
 
 #---------------------------------------------------------------------
@@ -295,8 +299,8 @@ def logFile(newFile, logType, logData):
         if not os.path.exists(errorfilename):
             # If error log doesn't exist, create it and add header
             errlog = open(errorfilename, "w")
-            strHeader =  "\n"
-            errlog.write(strHeader)
+            strErrHeader =  "Uploads\t  HTTP Err\tLast U/L Hrs\tI2C Success\tISS Err\tISS Avg Time\ttime stamp"
+            errlog.write(strErrHeader)
             errlog.close()             
 
     else: # append data to existing log file
@@ -432,22 +436,36 @@ g_rawDataNew = [0.0] * 8 # Initialize rawData list. This is weather data that's 
 g_TableHeaderCntr1 = 0 # Used to print header for weather data summary every so often
 
 g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send data to RPi
-g_i2cErrorCnt = 0 # Daily counter for I2C errors
+g_i2cDailyErrors = 0 # Daily counter for I2C errors
 
 g_uploadFreqWU = 60 # Seconds between uploads to Weather Underground
 
 g_oldDayOfMonth = int(time.strftime("%d"))   # Initialize day of month variable, used to detect when new day starts
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
 tmr_upload = time.time()     # Initialize timer to trigger when to upload to Weather Underground
-g_uploadSuccessTime = time.time()  # Used to hold timestamp of last successful upload. Setting this to current time so program can calculate
-                                   # how ong it takes for first block of data to come in from weather station on startup
 
 
-# Variables for keeping track of stats per hour
-cntUploadSuccess = 0
-cntUploadFailures = 0
-cntI2CSuccess =    0
-cntI2CFailures =   0
+# List to hold performance stats
+# 0 - W/U Uploads in last hour
+# 1 - W/U HTTP failures in last hour
+# 2 - Timestamp of last successful W/U upload - does not reset every hour
+# 3 - I2C success in last hour
+# 4 - I2C failures in last hour
+# 4 - ISS Packet decode errors in last hour
+# 5 - Average time (seconds) to receive ISS packet in last hour
+perfStats = [0,0,0,0,0,0,0]  # list to hold performance stats
+# List positions of each stat
+STAT_UPLOADS = 0   
+STAT_HTTP_FAIL = 1
+STAT_UPLOAD_TIMESTAMP = 2
+STAT_I2C_SUCCESS = 3
+STAT_I2C_FAIL = 4
+STAT_ISS_FAIL = 5
+STAT_ISS_SUCCESS = 6 
+
+perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()  # Used to hold timestamp of last successful upload. 
+
+
 hourTimer = time.time() + 3600
 
 
@@ -480,28 +498,27 @@ while True:
         # Exception handler for: OSError: [Errno 5] Input/output error. This occures when Moteino is rebooted
         try:
             g_rawDataNew = i2c_bus.read_i2c_block_data(I2C_ADDRESS, 0, 8)  # Get data from Moteino, 0 byte offset, get 8 bytes
-            cntI2CSuccess += 1
+            perfStats[STAT_I2C_SUCCESS] += 1 
 
             if (g_rawDataNew != rawDataOld): # See if new data has changed
                 g_gotNewISSDataTimer = time.time()
                 decodeStatus = decodeRawData(g_rawDataNew) # Send packet to decodeRawData() for decoding
                 if decodeStatus == False:
                     errMsg = "Error decoding ISS packet data"
-                    print(errMsg)
-                    logFile(False, "Error", errMsg)
-
+                    print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
+                    perfStats[STAT_ISS_FAIL] += 1
+                else:
+                    perfStats[STAT_ISS_SUCCESS] += 1
 
         except OSError:  # Got an I2C error
-            g_i2cErrorCnt += 1
-            cntI2CFailures += 1
-            if (g_i2cErrorCnt % 10 == 0):  # Print every 1o errors 
-                errMsg = "I2C Error, errors today: {}".format(g_i2cErrorCnt)
-                print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
-                logFile(False, "Error", errMsg)
-            time.sleep(5) # Sleep for 5 seconds
+            perfStats[STAT_I2C_FAIL] += 1
+            g_i2cDailyErrors += 1
+##            if (g_i2cDailyErrors % 10 == 0):  # Print every 10 errors 
+##                errMsg = "I2C Error, errors today: {}".format(g_i2cDailyErrors)
+##                print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
-            # Reset Moteino after every 200 I2C errors errors
-            if (g_i2cErrorCnt % 200 == 0):
+            # Reset Moteino after every 200 I2C errors 
+            if (g_i2cDailyErrors % 200 == 0):
                 errMsg = "High I2C errors, resetting Moteino"
                 print(errMsg)
                 logFile(False, "Error", errMsg)
@@ -512,7 +529,7 @@ while True:
     if newDayOfMonth != g_oldDayOfMonth:
         suntec.rainToday = 0.0
         g_oldDayOfMonth = newDayOfMonth
-        g_i2cErrorCnt = 0
+        g_i2cDailyErrors = 0
 
         # Create new log files for data and errors, First Param = True means to create a new file (False means append to file)
         logFile(True, "Data",   "")
@@ -539,29 +556,36 @@ while True:
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.  see: https://bit.ly/37y0gAU 
         uploadErrMsg = uploadStatus[1]
         if uploadStatus[0] == True:
-            g_uploadSuccessTime = time.time()
-            tmr_upload = time.time() + g_uploadFreqWU # Set next upload time 
-            cntUploadSuccess += 1
+            perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()
+            tmr_upload = time.time() + g_uploadFreqWU # Set next upload time
+            perfStats[STAT_UPLOADS] += 1
         else:
-            errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful uplaod: {:.1f} minutes ago".format((time.time() - g_uploadSuccessTime)/60)
+            errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful uplaod: {:.1f} minutes ago".format((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/60)
             print(errMsg)
-            logFile(False, "Error", errMsg)
-            cntUploadFailures += 1
+            perfStats[STAT_HTTP_FAIL] += 1
 
 
     # Every hour print and then reset some stats for debugging
     if (time.time() > hourTimer):
-        stats = "\nUpload Successes:{}, Failures: {}; I2C Succeses: {}, Failures:{}\n".format(cntUploadSuccess, cntUploadFailures, cntI2CSuccess, cntI2CFailures)
+        stats = "   {}\t    {}\t\t  {:.2f}\t\t  {:.1f}%\t\t  {}\t  {:.f}\t\t{}\n".format(perfStats[STAT_UPLOADS], perfStats[STAT_HTTP_FAIL], \
+                                                                        (time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/3600, \
+                                                                         perfStats[STAT_I2C_SUCCESS] / (perfStats[STAT_I2C_FAIL] + perfStats[STAT_I2C_SUCCESS]) * 100, \
+                                                                         perfStats[STAT_ISS_FAIL], perfStats[STAT_ISS_SUCCESS]/3600, \
+                                                                         time.strftime("%m/%d/%Y %I:%M:%S %p"))
+
+        strErrHeader =  "Uploads\t  HTTP Err\tLast U/L Hrs\tI2C Success\tISS Err\tISS Avg Time\ttime stamp"
+        print(strErrHeader)
         print(stats)
-        logFile(False, "Error", stats)
-        stats = "{:.2f} minutes since weather station sent new data.  Last upload to WU {:.1f} minutes ago".format((time.time() - g_gotNewISSDataTimer)/60, (time.time() - (tmr_upload - g_uploadFreqWU))/60)
-        print(stats)
+        print("\n")
         logFile(False, "Error", stats)
 
-        cntUploadSuccess = 0
-        cntUploadFailures = 0
-        cntI2CSuccess = 0
-        cntI2CFailures = 0
+        # Reset hourly stats
+        perfStats[STAT_UPLOADS] = 0
+        perfStats[STAT_HTTP_FAIL] = 0
+        perfStats[STAT_I2C_SUCCESS] = 0
+        perfStats[STAT_I2C_FAIL] = 0
+        perfStats[STAT_ISS_FAIL] = 0
+        perfStats[STAT_ISS_SUCCESS] = 0
         hourTimer = time.time() + 3600
        
 
