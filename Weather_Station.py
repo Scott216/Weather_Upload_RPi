@@ -4,15 +4,15 @@
 
 
 
-# To Do
+# To Do:
 # Get Pressure sensor and connect to RPi instead of getting pressure from another station
 # Cron jobs
 #   - Start weather station on bootup
 #   - Reboot RPi if weather station program stops 
-# If WU_download.getDailyRain() fails on startup, the read the rain from the log file
-# Unplug monitor and see if that gives you more options for screen resolution
-# Write log files to a USB thumb drive so you don't burn out MicroSD card with a lot of write operations
-# Reformat error logs so they are in a table format
+# If WU_download.getDailyRain() fails on startup, then read the rain from the log file
+# Error exception  handling for twilio SMS
+# Weekly status text like you do with water leak detector
+
 
 
 # Change Log
@@ -56,14 +56,25 @@
 # 11/10/20 v1.30 - Added g_NewISSDataTimeStamp.  There's a problem where weather station data is getting to Moteino,
 #                  but it's unchanged.  That's not what's really happening, I'm not sure what's going on.  This timestamp will be
 #                  used to reset Moteino
+# 11/15/20 v1.31 - Added SMS text with Twilio.  Send text if there's no uploads for 30 minutes.  Only do once day.
+#                  Change decodeRawData() to return a list 0: T/F of decode success, 1: error message
+# 12/14/20 v1.32 - Moved statemate that prints SMS to console ahead of twilio code in case twilio code crashes.  Changed detail log format, put ISS data at the end
+# 02/18/21 v1.33 - Moved log files to USB thumb drive
+# 02/27/21 v1.34 - Changed path for Deatal Log
+# 07/07/21 v1.35 - Added g_SMS_Offline_Msg_Sent to prevent multiple SMS messages sent when weather station is offline
+# 09/26/21 v1.36 - Turned off logging.  I think USB drives have issues
+# 10/29/21 v1.37 - Fixed type in line 254, Variable was datasent, should have been dataSent (with capital S)
+# 10/08/22 v1.38 - Fixed bug where sometimes rain rate would be 36, this happened when rain seconds was 1. Don't know why it would ever be this, but sometimes it was.
+#                  now rain seconds has to be > 10 for a valid calculation
 
-version = "v1.30"
+
+version = "v1.38"
 
 import time
 import smbus  # Used by I2C
 import os.path # used to see if a file exist
 import math # Used by humidity calculation
-import Adafruit_BME280  # https://github.com/adafruit/Adafruit_BME280_Library, to install: "sudo pip3 install Adafruit_BME280"
+import adafruit_bme280  # https://github.com/adafruit/Adafruit_BME280_Library, to install: "sudo pip3 install adafruit-circuitpython-bme280"
 import RPi.GPIO as GPIO # reads/writes GPIO pins
 import WU_credentials # Weather underground password, API key and station IDs
 import WU_download  # downloads daily rain on startup, and pressure from other weather staitons
@@ -71,7 +82,8 @@ import WU_upload  # uploads data to Weather Underground
 import WU_decodeWirelessData # Decodes wireless data coming from Davis ISS weather station
 import weatherData_cls # class to hold weather data for the Davis ISS station
 from subprocess import check_output # used to print RPi IP address
-
+from twilio.rest import Client  # https://pypi.org/project/twilio
+from twilio.base.exceptions import TwilioRestException
 
 I2C_ADDRESS = 0x04 # I2C address of Moteino
 ISS_STATION_ID = 1
@@ -83,7 +95,7 @@ suntec = weatherData_cls.weatherStation(ISS_STATION_ID)
 
 # Header byte 0, 4 MSB describe data in bytes 3-4
 ISS_CAP_VOLTS    = 0x2
-ISS_UV_INDEX     = 0x4d
+ISS_UV_INDEX     = 0x4
 ISS_RAIN_SECONDS = 0x5
 ISS_SOLAR_RAD    = 0x6
 ISS_OUT_TEMP     = 0x8
@@ -99,52 +111,55 @@ MOTEINO_RESET_PIN         = 36  # Output pin connected to Moteino Reset pin (BCM
 
 #---------------------------------------------------------------------
 # Validate weather data from wireless packet
+# Returns a list
+#  0: True/False if successfule
+#  1: error message
 #---------------------------------------------------------------------
 def decodeRawData(packet):
     # check CRC
-    if WU_decodeWirelessData.crc16_ccitt(packet) == False:
-        print('Invalid CRC {0[6]}, {0[7]}'.format(packet))
-        return(False) # CRC Failed, stop processing packet
+    if (WU_decodeWirelessData.crc16_ccitt(packet) == False):
+        errmsg = "Invalid CRC {0[6]}, {0[7]}".format(packet) 
+        return[False, errmsg] # CRC Failed, stop processing packet
 
     # Check station ID, don't want to get data from another nearby station
     packetStationID = WU_decodeWirelessData.stationID(packet)
-    if packetStationID != suntec.stationID:
-        print('Wrong station ID.  Expected {} but got{}'.format(suntec.stationID, packetStationID))
-        return(False) # wrong station ID, stop processing packet
+    if (packetStationID != suntec.stationID):
+        errmsg = 'Wrong station ID.  Expected {} but got{}'.format(suntec.stationID, packetStationID) 
+        return[False, errmsg] # wrong station ID, stop processing packet
     
     # CRC passed and staion ID okay, extract weather data from packet
 
     # Wind speed is in every packet
     newWindSpeed = WU_decodeWirelessData.windSpeed(packet)
-    if newWindSpeed >= 0:
+    if (newWindSpeed >= 0):
         suntec.windSpeed = newWindSpeed
     else:
-        print('Error exrtacting wind speed from packet. Got {} from {}'.format(newWindSpeed, packet))
+        errmsg = 'Error exrtacting wind speed from packet. Got {} from {}'.format(newWindSpeed, packet) 
         suntec.windSpeed  = 0
-        return(False) # error extracing wind speed, stop processing packet
+        return[False, errmsg] # error extracing wind speed, stop processing packet
     
     # Wind direction is in every packet
     newWindDir = WU_decodeWirelessData.windDirection(packet)
-    if newWindDir >= 0:
+    if (newWindDir >= 0):
         suntec.windDir = newWindDir
         suntec.avgWindDir(newWindDir)
     else:
-        print('Error exrtacting wind direction from packet. Got {} from {}'.format(newWindDir, packet))
-        return(False) # Error extracing wind direction, stop processing packet
+        errmsg = 'Error exrtacting wind direction from packet. Got {} from {}'.format(newWindDir, packet) 
+        return[False, errmsg] # Error extracing wind direction, stop processing packet
      
     dataSent = packet[0] >> 4 # From header byte 0, determine what data has been sent, then decode appropriate data below
 
     # Returns rain bucket tip counter.  1 count = 0.01".  Counter rolls over at 127
-    if dataSent == ISS_RAIN_COUNT:
+    if (dataSent == ISS_RAIN_COUNT):
         global g_rainCounterOld  # convert from local to global variable
         global g_rainCntDataPts  # convert from local to global variable
         
         rainCounterNew = WU_decodeWirelessData.rainCounter(packet)
-        if rainCounterNew < 0 or rainCounterNew > 127:
-            print('Invalid rain counter value:{} from {}'.format(rainCounterNew, packet))
-            return(False) # Invalid rain counter value
+        if (rainCounterNew < 0 or rainCounterNew > 127):
+            errmsg = 'Invalid rain counter value:{} from {}'.format(rainCounterNew, packet) 
+            return[False, errmsg] # Invalid rain counter value
         
-        # Don't calculate rain counts until RPi has received 2nd data point.  First data point will be the
+        # Don't calculate rain counts until program has received 2nd data point.  First data point will be the
         # starting value, then 2nd data point will be the accumulation, if any.  For example, if first time
         # data arrives its 50, we don't want to take 50-0 = 50 (ie 0.5") and add that to the daily rain accumulation.
         # Wait until the next data point comes in, which will probably be 50 (in this example), so 50-50 = 0.  No rain accumulated.
@@ -152,7 +167,7 @@ def decodeRawData(packet):
         if (g_rainCntDataPts == 1):
             g_rainCounterOld = rainCounterNew
             
-        if (g_rainCntDataPts >= 2) and (g_rainCounterOld != rainCounterNew):
+        if ( (g_rainCntDataPts >= 2) and (g_rainCounterOld != rainCounterNew) ):
 
             # See how many bucket tips counter went up.  Should be only one unless it's 
             # raining really hard or there is a long transmission delay from ISS
@@ -166,71 +181,83 @@ def decodeRawData(packet):
                 
         g_rainCntDataPts += 1 # Increment number times RPi received rain count data
 
-        return(True)
+        return[True, "rain count"]
         
     # Returns rain rate in inches per hour
-    if dataSent == ISS_RAIN_SECONDS:
+    if (dataSent == ISS_RAIN_SECONDS):
         rainSeconds = WU_decodeWirelessData.rainRate(packet) # seconds between bucket tips, 0.01" per tip
         fifteenMin = 60 * 15 # seconds in 15 minutes
-        if rainSeconds > 0: #If no error
+        if (rainSeconds > 10): # If no error 
             if (rainSeconds < fifteenMin):
                 suntec.rainRate = (0.01 * 3600.0) / rainSeconds
             else:
                 suntec.rainRate = 0.0 # More then 15 minutes since last bucket tip, can't calculate rain rate until next bucket tip
-            return(True)
-        print('Invalid rain seconds. Got {} from {}'.format(rainSeconds, packet))
-        return(False)
+            return[True, "rain rate"]
+        errmsg = 'Invalid rain seconds. Got {} from {}'.format(rainSeconds, packet) 
+        return[False, errmsg]
     
     # Returns temperature F
-    if dataSent == ISS_OUT_TEMP:
+    if (dataSent == ISS_OUT_TEMP):
         newTemp = WU_decodeWirelessData.temperature(packet)
-        if newTemp > -100: #If no error
+        if (newTemp > -100): #If no error
             suntec.outsideTemp = newTemp
             suntec.calcWindChill() # calculate windchill
             # If we have R/H too, then calculate dew point
-            if suntec.gotHumidityData():
+            if (suntec.gotHumidityData() == True):
                 newDewPoint = suntec.calcDewPoint() # Calculate dew point
                 if (newDewPoint <= -100): 
-                    print('Invalid dewpoint: {} from temp={} and humidity={}'.format(newDewPoint, suntec.outsideTemp, suntec.humidity))
-            return(True)
-        else: 
-            print('Invalid temperature. Got {} from {}'.format(newTemp, packet))
-            return(False)
+                    errmsg = 'Invalid dewpoint: {} from temp={} and humidity={}'.format(newDewPoint, suntec.outsideTemp, suntec.humidity) 
+            return[True, "Temperature"]
+        else:
+            errmsg = 'Invalid temperature. Got {} from {}'.format(newTemp, packet) 
+            return[False, errmsg]
     
     # Returns wind gusts in MPH
-    if dataSent == ISS_WIND_GUST:
+    if (dataSent == ISS_WIND_GUST):
         newWindGust = WU_decodeWirelessData.windGusts(packet)
         if newWindGust >= 0:
             suntec.windGust = newWindGust
-            return(True)
-        print('Invalid wind gust. Got {} from {}'.format(newWindGuest, packet))
-        return(False)
+            return[True, "Wind Gust"]
+        errmsg = 'Invalid wind gust. Got {} from {}'.format(newWindGuest, packet) 
+        return[False, errmsg]
     
     # Returns relative humidity
-    if dataSent == ISS_HUMIDITY:
+    if (dataSent == ISS_HUMIDITY):
         newHumidity = WU_decodeWirelessData.humidity(packet)
-        if newHumidity > 0:
+        if (newHumidity > 0):
             suntec.humidity = newHumidity
             # If we have outside temperature too, then calculate dew point
-            if suntec.gotTemperatureData():
+            if (suntec.gotTemperatureData() == True):
                 newDewPoint = suntec.calcDewPoint() # Calculate dew point
-                if (newDewPoint <= -100): 
-                    print('Invalid dewpoint: {} from temp={} and humidity={}'.format(newDewPoint, suntec.outsideTemp, suntec.humidity))
+                if (newDewPoint <= -100):
+                    errmsg = 'Invalid dewpoint: {} from temp={} and humidity={}'.format(newDewPoint, suntec.outsideTemp, suntec.humidity) 
+                    print(errmsg)
 
-            return(True)
-        print('Invalid humidity. Got {} from {}'.format(newHumidity, packet))
-        return(False)
+            return[True, "Humidity"]
+        errmsg = 'Invalid humidity. Got {} from {}'.format(newHumidity, packet) 
+        return[False, errmsg]
 
     # Returns capicator voltage
-    if dataSent == ISS_CAP_VOLTS:
+    if (dataSent == ISS_CAP_VOLTS):
         newCapVolts = WU_decodeWirelessData.capVoltage(packet)
-        if newCapVolts >= 0:
+        if (newCapVolts >= 0):
             suntec.capacitorVolts = newCapVolts
-            return(True)
+            return[True, "Cap volts"]
         else:
-            print('Invalid cap volts.  Got {} from {}'.format(newCapVolts, packet))
+            errmsg = 'Invalid cap volts.  Got {} from {}'.format(newCapVolts, packet) 
             suntec.capacitorVolts = -1
-            return(False)
+            return[False, errmsg]
+
+    # Returns relative UV Index
+    if (dataSent == ISS_UV_INDEX):
+        return[True, "UV Index"]
+
+    # Returns relative Solar Radiation
+    if (dataSent == ISS_SOLAR_RAD):
+        return[True, "Solar Radiation"]
+
+    # If it makes it here, there's an if() missing for datatype. 
+    return[False, "{}  {}".format("Missing if() statement for byte header:", dataSent)]    
 
 
 #---------------------------------------------------------------------
@@ -238,13 +265,13 @@ def decodeRawData(packet):
 #---------------------------------------------------------------------
 def getAtmosphericPressure():
 # Create BME280 object
-
+    
 # Adafruit Github code
 #  https://github.com/adafruit/Adafruit_IO_Python/blob/master/examples/basics/environmental_monitor.py
-    bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c)
+    bme280 = adafruit_bme280.Adafruit_BME280_I2C(i2c_bus)
     bme280.sea_level_pressure = 1013.25
 # Read BME280 pressure
-    suntec.pressure = bme280.pressure    
+    suntec.pressure = bme280.pressure
 
 
 #---------------------------------------------------------------------
@@ -289,8 +316,11 @@ def printWeatherDataTable(printRawData=None):
 #---------------------------------------------------------------------
 def logFile(newFile, logType, logData):
 
-    datafilename =  "Logs/Upload Data_" + time.strftime("%y%m%d") + ".txt"
-    errorfilename = "Logs/Error log_"   + time.strftime("%y%m%d") + ".txt"
+    return(False) # SRG added 9/26/21 so there would be no logging
+
+    datafilename =  "/media/pi/WEATHERDATA/Upload Data_" + time.strftime("%y%m%d") + ".txt"
+    errorfilename = "/media/pi/WEATHERDATA/Error log_"   + time.strftime("%y%m%d") + ".txt"
+    
 
     if (newFile == True):
         # Create new data log file
@@ -305,7 +335,7 @@ def logFile(newFile, logType, logData):
         if not os.path.exists(errorfilename):
             # If error log doesn't exist, create it and add header
             errlog = open(errorfilename, "w")
-            strErrHeader =  "Uploads\t  HTTP Err\tLast U/L Hrs\tI2C Success\tISS Err\tISS Avg Min\tISS Age\ttime stamp\n"
+            strErrHeader =  "Uploads\t  HTTP Err\tLast U/L Hrs\tI2C Success\tISS Err\tISS Avg Min\tISS Age\t\ttime stamp\n"
             errlog.write(strErrHeader)
             errlog.close()             
 
@@ -368,17 +398,17 @@ def logFileDetail():
                                    perfStats[STAT_I2C_FAIL],
                                    perfStats[STAT_ISS_SUCCESS],
                                    perfStats[STAT_ISS_FAIL],
-                                   g_rawDataNew,
-                                   time.strftime("%m/%d/%Y %I:%M:%S %p")
+                                   time.strftime("%m/%d/%Y %I:%M:%S %p"),
+                                   g_rawDataNew
                                 )
     print(detailLogOutput)
 
-
-    detailErrFilename = "Logs/Detail Error log.txt"
-    detErrlog = open(detailErrFilename, "a")
-    detErrlog.write(detailLogOutput)
-    detErrlog.write('\n')    
-    detErrlog.close()
+##  SRG disabled logging 9/26/21
+##    detailErrFilename = "/media/pi/WEATHERDATA/Detail Error log.txt"
+##    detErrlog = open(detailErrFilename, "a")
+##    detErrlog.write(detailLogOutput)
+##    detErrlog.write('\n')    
+##    detErrlog.close()
 
 
 #---------------------------------------------------------------------
@@ -388,6 +418,23 @@ def printWirelessData():
 
     wirelessData =  ''.join(['%02x ' %b for b in g_rawDataNew])
     print(wirelessData)
+
+#------------------------------------------------------------------
+# Send SMS via Twilio
+#------------------------------------------------------------------
+def sendSMS(sms_msg):
+
+    print("About to send SMS message: {}".format(sms_msg))
+
+    try:
+        smsclient = Client(WU_credentials.TWILIO_ACCOUNT_SID, WU_credentials.TWILIO_AUTH_TOKEN)
+        message = smsclient.messages.create(body=sms_msg, from_=WU_credentials.TWILIO_PHONE, to=WU_credentials.TO_PHONE)
+    except TwilioRestException as smserr:
+        print("Twilio SMS failed: {}".format(smserr))
+
+    g_SMS_Sent_Today = True
+    time.sleep(3)  # In case there are more than 1 message close together, don't send to quickly
+    
 
 #---------------------------------------------------------------------
 # Checks Moteino heartbeat
@@ -444,13 +491,16 @@ IP = IP.decode('utf-8') # removes b' previx
 print("RPi IP Address: {}".format(IP)) 
 print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
+sendSMS("Weather Station Restarted")
+g_SMS_Sent_Today = False
+
 # Create log files for data and errors, First Param = True means to create a new file, vs append to a file
 logFile(True, "Data",   "")
 logFile(True, "Errors", "")
 
 
 # Set to zero, weatherStation class initially sets these to -100 for No Data yet
-suntec.windGust = 0.0
+suntec.windGust =  0.0
 suntec.rainToday = 0.0
 
 # Get daily rain data from weather station
@@ -463,6 +513,8 @@ else:
     print("{} {}    {}".format(errMsg, newRainToday[1], time.strftime("%m/%d/%Y %I:%M:%S %p")))
     
 
+i2c_bus = smbus.SMBus(1)  # for I2C
+
 # Get pressure from other nearby weather stations
 newPressure = WU_download.getPressure()
 if newPressure > 25:
@@ -471,7 +523,7 @@ else:
    errMsg = "Error getting pressure data on startup"
    print("{}  {}".format(errMsg,time.strftime("%m/%d/%Y %I:%M:%S %p")))
 
-i2c_bus = smbus.SMBus(1)  # for I2C
+
 
 # Setup GPIO using Board numbering (vs BCM numbering)
 GPIO.setmode(GPIO.BOARD)
@@ -490,46 +542,31 @@ g_heartbeatOld = g_heartbeatNew
 g_lastHeartbeatTime = time.time() 
 g_moteinoReady = False # Monitors GPIO pin to see when Moteino is ready to send data to RPi
 g_NewISSDataTimeStamp = time.time() + (60 * 10) # Timestamp when last NEW ISS data came in. Default to 10 min from startup 
-
-
+g_SMS_Sent_Today = False  # flag so SMS is only sent once a day
+g_SMS_Offline_Msg_Sent = False # flag so SMS is offline message is only sent once
 g_rainCounterOld = 0   # Previous value of rain counter, used in def decodeRawData()
 g_rainCntDataPts = 0   # Counts the times RPi has received rain counter data, this is not the actual rain counter, thats g_rainCounterOld and rainCounterNew
-
 g_rawDataNew = [0.0] * 8 # Initialize rawData list. This is weather data that's sent from Moteino
-
 g_TableHeaderCntr1 = 0 # Used to print header for weather data summary every so often
-
 g_i2cDailyErrors = 0 # Daily counter for I2C errors
-
-
 g_uploadFreqWU = 60 # Seconds between uploads to Weather Underground
-
 g_oldDayOfMonth = int(time.strftime("%d"))   # Initialize day of month variable, used to detect when new day starts
 g_tmr_Moteino = time.time()  # Used to request data from moteino every second
 tmr_upload = time.time()     # Initialize timer to trigger when to upload to Weather Underground
-
-
-# List to hold performance stats
-# 0 - W/U Uploads in last hour
-# 1 - W/U HTTP failures in last hour
-# 2 - Timestamp of last successful W/U upload - does not reset every hour
-# 3 - I2C success in last hour
-# 4 - I2C failures in last hour
-# 5 - ISS Packet decode errors in last hour
-# 6 - Average time (seconds) to receive ISS packet in last hour
-# 7 - Timestamp of last time received NEW weather data.  Not reset every hour. SRG - This seems to be a problem 
-perfStats = [0,0,time.time(),0,0,0,0,time.time()]  # list to hold performance stats
-# List positions for perfStats[]
-STAT_UPLOADS = 0   
-STAT_HTTP_FAIL = 1
-STAT_UPLOAD_TIMESTAMP = 2
-STAT_I2C_SUCCESS = 3
-STAT_I2C_FAIL = 4
-STAT_ISS_FAIL = 5
-STAT_ISS_SUCCESS = 6
-STAT_NEW_ISS_TIMESTAMP = 7
-
 hourTimer = time.time() + 3600
+
+
+# List positions for perfStats[] list
+STAT_UPLOADS = 0           # 0 - W/U Uploads in last hour
+STAT_HTTP_FAIL = 1         # 1 - W/U HTTP failures in last hour
+STAT_UPLOAD_TIMESTAMP = 2  # 2 - Timestamp of last successful W/U upload - does not reset every hour
+STAT_I2C_SUCCESS = 3       # 3 - I2C success in last hour
+STAT_I2C_FAIL = 4          # 4 - I2C failures in last hour
+STAT_ISS_FAIL = 5          # 5 - ISS Packet decode errors in last hour
+STAT_ISS_SUCCESS = 6       # 6 - Average time (seconds) to receive ISS packet in last hour
+STAT_NEW_ISS_TIMESTAMP = 7 # 7 - Timestamp of last time received NEW weather data.  Not reset every hour. This seems to be the main problem when uploads stop - Moteino keeps sending the same packet 
+perfStats = [0,0,time.time(),0,0,0,0,time.time()]  # list to hold performance stats
+
 
 
 # Only use this until you get pressure sensor installed
@@ -548,7 +585,7 @@ while True:
         g_moteinoReady = False
         
     
-    decodeStatus = False # Reset status
+    decodeStatus = [False, ""] # Reset status. decodeStatus[1] is an errmsg
     
     if (g_moteinoReady and (time.time() > g_tmr_Moteino) and isHeartbeatOK()): 
         g_tmr_Moteino = time.time() + 1 # add 1 second to Moteino timer, this is used so Moteino is only queried once a second
@@ -566,9 +603,8 @@ while True:
                 perfStats[STAT_NEW_ISS_TIMESTAMP] = time.time()
                 g_NewISSDataTimeStamp = time.time()
                 decodeStatus = decodeRawData(g_rawDataNew) # Send packet to decodeRawData() for decoding
-                if decodeStatus == False:
-                    errMsg = "Error decoding ISS packet data"
-                    print("{}   {}".format(errMsg, time.strftime("%m/%d/%Y %I:%M:%S %p")))
+                if (decodeStatus[0] == False):
+                    print("{}   {}".format(decodeStatus[1], time.strftime("%m/%d/%Y %I:%M:%S %p")))
                     perfStats[STAT_ISS_FAIL] += 1
                 else:
                     perfStats[STAT_ISS_SUCCESS] += 1
@@ -577,17 +613,18 @@ while True:
             perfStats[STAT_I2C_FAIL] += 1
             g_i2cDailyErrors += 1
 
-    # If it's a new day, reset daily rain accumulation and I2C Error counter
+    # If it's a new day, reset daily rain accumulation, I2C Error counter, and SMS flags
     newDayOfMonth = int(time.strftime("%d"))
     if newDayOfMonth != g_oldDayOfMonth:
         suntec.rainToday = 0.0
         g_oldDayOfMonth = newDayOfMonth
         g_i2cDailyErrors = 0
+        g_SMS_Sent_Today = False
+        g_SMS_Offline_Msg_Sent = False
 
         # Create new log files for data and errors, First Param = True means to create a new file (False means append to file)
         logFile(True, "Data",   "")
         logFile(True, "Errors", "")
-
 
 
 #  get pressure from other W/U stations once an hour, once you get BME280 sensor installed, you can get it more frequently
@@ -600,7 +637,7 @@ while True:
 
     # If RPi has reecived new valid data from Moteino, and upload timer has passed, and RPi has dewpoint data (note, dewpoint depends on Temp
     # and R/H) then upload new data to Weather Underground
-    if ((suntec.gotDewPointData() == True) and (decodeStatus == True) & (time.time() > tmr_upload)):
+    if ( (suntec.gotDewPointData() == True) and (decodeStatus[0] == True) and (time.time() > tmr_upload) ):
 #srg        newPressure = WU_download.getPressure() # get latest pressure from local weather station
 #srg        if (newPressure > 25):
 #srg            suntec.pressure = newPressure  # if a new valid pressure is retrieved, update data. If not, use current value
@@ -608,22 +645,26 @@ while True:
         
         uploadStatus = WU_upload.upload2WU(suntec, WU_STATION) # upload2WU() returns a list, [0] is succuss/faulure of upload [1] is error message.  see: https://bit.ly/37y0gAU 
         uploadErrMsg = uploadStatus[1]
-        # srg debug why uploads stop
-        if (time.time() > (perfStats[STAT_UPLOAD_TIMESTAMP] + 300) ):  # srg debug
-            print("(debug) HTTP Response: {}".format(uploadStatus))    # srg debug
         if uploadStatus[0] == True:
             perfStats[STAT_UPLOAD_TIMESTAMP] = time.time()
             tmr_upload = time.time() + g_uploadFreqWU # Set next upload time
             perfStats[STAT_UPLOADS] += 1
         else:
-            errMsg = "Error in upload2WU(), " + uploadErrMsg + ", Last successful uplaod: {:.1f} minutes ago".format((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/60)
-            print("{}  {}".format(errMsg,time.strftime("%m/%d/%Y %I:%M:%S %p")))
+            errMsg = "Error in upload2WU(), {}, Last successful uplaod: {:.1f} minutes ago   {}". \
+                     format(uploadErrMsg, (time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/60, time.strftime("%m/%d/%Y %I:%M:%S %p"))
+            print(errMsg)
             perfStats[STAT_HTTP_FAIL] += 1
 
     # if no upload to W/U for at least 5 min (300 seconds), then print detail data every minute
     if ( (time.time() > detailStatTimer) and ((time.time() - perfStats[STAT_UPLOAD_TIMESTAMP]) > 300)):
         logFileDetail()
         detailStatTimer = time.time() + 60 # reset timer
+
+    # if no upload to W/U for at least 30 min send SMS message
+    if ( (time.time() - perfStats[STAT_UPLOAD_TIMESTAMP]) > (60 * 30) and (g_SMS_Sent_Today == False) and (g_SMS_Offline_Msg_Sent == False)):
+        sendSMS("Weather Station is offline")
+        g_SMS_Offline_Msg_Sent = True
+
 
     # Reset Moteino after every 200 I2C errors 
     if ( (g_i2cDailyErrors % 200 == 0) and (g_i2cDailyErrors > 0) ):
@@ -643,11 +684,11 @@ while True:
 
     # Every hour print and then reset some stats for debugging
     if (time.time() > hourTimer):
-        stats = "   {}\t    {}\t\t  {:.2f}\t\t  {:.1f}%\t\t  {}\t  {:.2f}\t{:.1f}\t\t".format(perfStats[STAT_UPLOADS], perfStats[STAT_HTTP_FAIL], 
+        stats = "   {}\t    {}\t\t  {:.2f}\t\t  {:.1f}%\t\t  {}\t  {:.2f}\t\t{:.1f}\t\t".format(perfStats[STAT_UPLOADS], perfStats[STAT_HTTP_FAIL], 
                                                                         (time.time() - perfStats[STAT_UPLOAD_TIMESTAMP])/3600, 
                                                                          perfStats[STAT_I2C_SUCCESS] / (perfStats[STAT_I2C_FAIL] + perfStats[STAT_I2C_SUCCESS]) * 100, 
                                                                          perfStats[STAT_ISS_FAIL], perfStats[STAT_ISS_SUCCESS]/3600,
-                                                                         perfStats[STAT_NEW_ISS_TIMESTAMP]/60 )
+                                                                         (time.time() - perfStats[STAT_NEW_ISS_TIMESTAMP])/60 )  
         logFile(False, "Error", stats)
 
         # Reset hourly stats
