@@ -63,12 +63,12 @@
 # 02/27/21 v1.34 - Changed path for Deatal Log
 # 07/07/21 v1.35 - Added g_SMS_Offline_Msg_Sent to prevent multiple SMS messages sent when weather station is offline
 # 09/26/21 v1.36 - Turned off logging.  I think USB drives have issues
-# 10/29/21 v1.37 - Fixed type in line 254, Variable was datasent, should have been dataSent (with capital S)
+# 10/29/21 v1.37 - Fixed typo in line 254, Variable was datasent, should have been dataSent (with capital S)
 # 10/08/22 v1.38 - Fixed bug where sometimes rain rate would be 36, this happened when rain seconds was 1. Don't know why it would ever be this, but sometimes it was.
 #                  now rain seconds has to be > 10 for a valid calculation
+# 03/01/23 v1.39 - Added code to get and print public IP address on startup.
 
-
-version = "v1.38"
+version = "v1.39"
 
 import time
 import smbus  # Used by I2C
@@ -84,6 +84,9 @@ import weatherData_cls # class to hold weather data for the Davis ISS station
 from subprocess import check_output # used to print RPi IP address
 from twilio.rest import Client  # https://pypi.org/project/twilio
 from twilio.base.exceptions import TwilioRestException
+import requests # used to get public IP address   Ref: https://stackoverflow.com/questions/61347442/how-can-i-find-my-ip-address-with-python-not-local-ip
+
+
 
 I2C_ADDRESS = 0x04 # I2C address of Moteino
 ISS_STATION_ID = 1
@@ -490,8 +493,10 @@ IP = IP.rstrip()  # strips off eol characters
 IP = IP.decode('utf-8') # removes b' previx
 print("RPi IP Address: {}".format(IP)) 
 print("Ver: {}    {}".format(version, time.strftime("%m/%d/%Y %I:%M:%S %p")))
+public_IP = requests.get("http://wtfismyip.com/text").text
+print("Suntec public IP: {}".format(public_IP)) 
 
-sendSMS("Weather Station Restarted")
+sendSMS("Weather Station Restarted. \nPublic IP: " + public_IP)
 g_SMS_Sent_Today = False
 
 # Create log files for data and errors, First Param = True means to create a new file, vs append to a file
